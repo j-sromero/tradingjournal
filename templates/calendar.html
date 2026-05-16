@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="calendar-header">
+  <a class="btn" href="?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
+  <h1>📅 {{ month_name }}</h1>
+  <a class="btn" href="?year={{ next_y }}&month={{ next_m }}">Next →</a>
+</div>
+<p>Total month P&amp;L:
+  <strong class="{{ 'pos' if month_pnl >= 0 else 'neg' }}">${{ month_pnl }}</strong>
+</p>
+
+<div class="calendar-grid">
+  {% for d in ['Mon','Tue','Wed','Thu','Fri','Sat','Sun','Week'] %}
+    <div class="cal-head">{{ d }}</div>
+  {% endfor %}
+  {% for week in grid %}
+    {% for day in week %}
+      {% if day %}
+        <a href="{{ url_for('trades_list', day=day.date) }}" class="cal-day {% if day.pnl > 0 %}pos-bg{% elif day.pnl < 0 %}neg-bg{% endif %}" title="View trades with activity on {{ day.date }}">
+          <div class="cal-num">{{ day.day }}</div>
+          {% if day.count %}
+            <div class="cal-pnl {{ 'pos' if day.pnl >= 0 else 'neg' }}">${{ day.pnl }}</div>
+            <div class="cal-count">{{ day.count }} trade{{ '' if day.count == 1 else 's' }}</div>
+          {% endif %}
+        </a>
+      {% else %}
+        <div class="cal-day empty"></div>
+      {% endif %}
+    {% endfor %}
+    {% set week_pnl = week | selectattr('pnl') | map(attribute='pnl') | sum %}
+    <div class="cal-day week-total {{ 'pos-bg' if week_pnl > 0 else ('neg-bg' if week_pnl < 0 else '') }}">
+      <div class="cal-num" style="font-size:0.7rem;color:var(--muted);">Week</div>
+      <div class="cal-pnl {{ 'pos' if week_pnl > 0 else ('neg' if week_pnl < 0 else '') }}">${{ '%.2f'|format(week_pnl) }}</div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}

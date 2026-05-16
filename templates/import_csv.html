@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>📥 Import Broker CSV</h1>
+<div class="card">
+  <p>Upload a CSV with the following columns (headers required, others optional):</p>
+  <p><code>ticker, market, direction, entry_date, exit_date, entry_price, exit_price, size, stop_loss, take_profit, fees, setup, tags</code></p>
+  <ul>
+    <li><strong>Required:</strong> <code>ticker</code>, <code>direction</code> (long/short), <code>entry_date</code>, <code>entry_price</code>, <code>size</code></li>
+    <li>If <code>exit_price</code> is blank, the trade will be marked open.</li>
+    <li>Dates: <code>YYYY-MM-DDTHH:MM</code></li>
+  </ul>
+  <form method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".csv,.htm,.html" required>
+    <button class="btn primary">Import</button>
+  </form>
+</div>
+{% endblock %}

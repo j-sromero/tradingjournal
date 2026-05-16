@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>📊 Analytics</h1>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <div>
+      <h2 style="margin-bottom:0.35rem;">Trade Performance Distribution</h2>
+      <p class="muted" style="margin:0;">Trades are shown in chronological order so you can see how consistently you cut losers and let winners run over time.</p>
+    </div>
+    <label style="display:flex;align-items:center;gap:0.6rem;color:var(--muted);font-size:0.9rem;font-weight:600;">
+      Metric
+      <select id="histogram-metric" style="min-width:150px;">
+        <option value="pnl">Dollar P&amp;L</option>
+        <option value="pnl_pct">Return %</option>
+        <option value="r_multiple">R-Multiple</option>
+      </select>
+    </label>
+  </div>
+  <div class="analytics-histogram-wrap">
+    <canvas id="trade-performance-histogram"></canvas>
+  </div>
+</div>
+
+{% macro group_table(title, data, label) %}
+<div class="card">
+  <h2>{{ title }}</h2>
+  <table>
+    <thead><tr><th>{{ label }}</th><th>P&amp;L</th><th>Trades</th><th>Win %</th></tr></thead>
+    <tbody>
+      {% for row in data %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="{{ 'pos' if row.pnl >= 0 else 'neg' }}">${{ row.pnl }}</td>
+        <td>{{ row.count }}</td>
+        <td>{{ row.win_rate }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <canvas id="chart-{{ title|replace(' ','-')|replace('/','') }}" height="80"></canvas>
+</div>
+{% endmacro %}
+
+<div class="card" style="margin-top:2rem;">
+  <h2>🚨 Worst Trades by Capital Impact</h2>
+  <p class="muted">These trades had the largest negative effect on your capital. Review them to spot sizing or execution issues.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Entry</th>
+        <th>Exit</th>
+        <th>Position Value</th>
+        <th>P&amp;L</th>
+        <th>Return %</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in worst_trades %}
+      <tr>
+        <td>{{ t.ticker }}</td>
+        <td>{{ t.entry_date[:10] if t.entry_date else '' }}</td>
+        <td>{{ t.exit_date[:10] if t.exit_date else '' }}</td>
+        <td>${{ '%.2f'|format(t.position_value) }}</td>
+        <td class="{{ 'pos' if t.pnl >= 0 else 'neg' }}">${{ '%.2f'|format(t.pnl) }}</td>
+        <td>{{ '%.2f'|format(t.return * 100) }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div style="margin-top:1rem;font-size:1.1em;">
+    <strong>Suggested sizing rule:</strong>
+    Cap position size at <b>${{ '%.2f'|format(suggested_sizing_rule) }}</b> (median position value).
+  </div>
+</div>
+
+{{ group_table("By Asset", by_asset, "Ticker") }}
+{{ group_table("By Setup", by_setup, "Setup") }}
+{{ group_table("By Emotion", by_emotion, "Emotion") }}
+{{ group_table("By Market", by_market, "Market") }}
+{{ group_table("By Day of Week", by_dow, "Day") }}
+{{ group_table("By Hour", by_hour, "Hour") }}
+{{ group_table("Plan Discipline", by_plan, "Behavior") }}
+
+
+
+<script>
+  const tradeHistogram = {{ trade_histogram|tojson }};
+  const datasets = {
+    "By-Setup": {{ by_setup|tojson }},
+    "By-Emotion": {{ by_emotion|tojson }},
+    "By-Asset": {{ by_asset|tojson }},
+    "By-Market": {{ by_market|tojson }},
+    "By-Day-of-Week": {{ by_dow|tojson }},
+    "By-Hour": {{ by_hour|tojson }},
+    "Plan-Discipline": {{ by_plan|tojson }},
+  };
+
+  const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e5e7eb';
+  const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8';
+  const borderColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || 'rgba(148, 163, 184, 0.15)';
+  const histogramMetricSelect = document.getElementById('histogram-metric');
+
+  const metricConfig = {
+    pnl: {
+      key: 'pnl',
+      label: 'Trade P&L',
+      axis: 'Performance ($)',
+      formatter: value => `$${value.toFixed(2)}`,
+      tooltip: trade => [
+        `P&L: $${trade.pnl.toFixed(2)}`,
+        `Direction: ${trade.direction}`,
+        `Setup: ${trade.setup}`,
+        ...(trade.pnl_pct !== null ? [`Return: ${trade.pnl_pct.toFixed(2)}%`] : []),
+        ...(trade.r_multiple !== null ? [`R: ${trade.r_multiple.toFixed(2)}R`] : []),
+      ],
+      avgWinnerLabel: value => `Avg winner: $${value.toFixed(2)}`,
+      avgLoserLabel: value => `Avg loser: $${value.toFixed(2)}`,
+    },
+    pnl_pct: {
+      key: 'pnl_pct',
+      label: 'Trade Return %',
+      axis: 'Performance (%)',
+      formatter: value => `${value.toFixed(2)}%`,
+      tooltip: trade => [
+        ...(trade.pnl_pct !== null ? [`Return: ${trade.pnl_pct.toFixed(2)}%`] : []),
+        `P&L: $${trade.pnl.toFixed(2)}`,
+        `Direction: ${trade.direction}`,
+        `Setup: ${trade.setup}`,
+        ...(trade.r_multiple !== null ? [`R: ${trade.r_multiple.toFixed(2)}R`] : []),
+      ],
+      avgWinnerLabel: value => `Avg winner: ${value.toFixed(2)}%`,
+      avgLoserLabel: value => `Avg loser: ${value.toFixed(2)}%`,
+    },
+    r_multiple: {
+      key: 'r_multiple',
+      label: 'Trade R-Multiple',
+      axis: 'Performance (R)',
+      formatter: value => `${value.toFixed(2)}R`,
+      tooltip: trade => [
+        ...(trade.r_multiple !== null ? [`R: ${trade.r_multiple.toFixed(2)}R`] : []),
+        `P&L: $${trade.pnl.toFixed(2)}`,
+        `Direction: ${trade.direction}`,
+        `Setup: ${trade.setup}`,
+        ...(trade.pnl_pct !== null ? [`Return: ${trade.pnl_pct.toFixed(2)}%`] : []),
+      ],
+      avgWinnerLabel: value => `Avg winner: ${value.toFixed(2)}R`,
+      avgLoserLabel: value => `Avg loser: ${value.toFixed(2)}R`,
+    },
+  };
+
+  function valuesForMetric(metric) {
+    return tradeHistogram.map(trade => {
+      const value = trade[metric.key];
+      return value === null || value === undefined ? 0 : value;
+    });
+  }
+
+  function averagesForMetric(metric) {
+    const positives = tradeHistogram.map(trade => trade[metric.key]).filter(value => value !== null && value > 0);
+    const negatives = tradeHistogram.map(trade => trade[metric.key]).filter(value => value !== null && value < 0);
+    return {
+      winner: positives.length ? positives.reduce((sum, value) => sum + value, 0) / positives.length : null,
+      loser: negatives.length ? negatives.reduce((sum, value) => sum + value, 0) / negatives.length : null,
+    };
+  }
+
+  const histogramCanvas = document.getElementById('trade-performance-histogram');
+  if (histogramCanvas) {
+    const defaultMetric = metricConfig[histogramMetricSelect?.value || 'pnl'];
+    const histogramChart = new Chart(histogramCanvas, {
+      type: 'bar',
+      data: {
+        labels: tradeHistogram.map(d => d.date),
+        datasets: [{
+          label: defaultMetric.label,
+          data: valuesForMetric(defaultMetric),
+          borderRadius: 4,
+          backgroundColor: valuesForMetric(defaultMetric).map(value => value >= 0 ? 'rgba(33,150,243,0.7)' : 'rgba(233,30,99,0.7)'),
+          borderColor: valuesForMetric(defaultMetric).map(value => value >= 0 ? 'rgba(33,150,243,1)' : 'rgba(233,30,99,1)'),
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: items => {
+                const trade = tradeHistogram[items[0].dataIndex];
+                return `#${trade.trade_id} · ${trade.ticker} · ${trade.date}`;
+              },
+              label: context => {
+                const trade = tradeHistogram[context.dataIndex];
+                return metricConfig[histogramMetricSelect?.value || 'pnl'].tooltip(trade);
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            title: { display: true, text: 'Trades in chronological order', color: textColor },
+            ticks: {
+              color: mutedColor,
+              maxRotation: 45,
+              minRotation: 45,
+              autoSkip: true,
+              maxTicksLimit: 12,
+              callback: function(value, index) {
+                const d = tradeHistogram[index]?.date;
+                if (!d) return '';
+                const parts = d.match(/(\d{4})-(\w+)-(\d{2})/);
+                if (!parts) return d;
+                const months = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+                return `${parts[3]}/${months[parts[2]]}/${parts[1].slice(2)}`;
+              }
+            },
+            grid: { display: false }
+          },
+          y: {
+            title: { display: true, text: defaultMetric.axis, color: textColor },
+            ticks: { color: mutedColor },
+            grid: { color: borderColor },
+            border: { color: borderColor }
+          }
+        },
+        referenceLinesData: averagesForMetric(defaultMetric)
+      },
+      plugins: [{
+        id: 'referenceLines',
+        afterDatasetsDraw(chart) {
+          const { ctx, chartArea, scales: { y } } = chart;
+          if (!chartArea) return;
+          const metric = metricConfig[histogramMetricSelect?.value || 'pnl'];
+          const averages = chart.options.referenceLinesData || { winner: null, loser: null };
+          const lines = [
+            averages.winner !== null ? { value: averages.winner, color: 'rgba(74,222,128,0.95)', label: metric.avgWinnerLabel(averages.winner) } : null,
+            averages.loser !== null ? { value: averages.loser, color: 'rgba(248,113,113,0.95)', label: metric.avgLoserLabel(averages.loser) } : null,
+          ].filter(Boolean);
+          ctx.save();
+          ctx.setLineDash([6, 6]);
+          ctx.font = '12px Inter, sans-serif';
+          lines.forEach(line => {
+            const yPos = y.getPixelForValue(line.value);
+            ctx.strokeStyle = line.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(chartArea.left, yPos);
+            ctx.lineTo(chartArea.right, yPos);
+            ctx.stroke();
+            ctx.fillStyle = line.color;
+            ctx.textAlign = 'right';
+            ctx.fillText(line.label, chartArea.right - 6, yPos - 6);
+          });
+          ctx.restore();
+        }
+      }]
+    });
+
+    function updateHistogramMetric(mode) {
+      const metric = metricConfig[mode] || metricConfig.pnl;
+      const values = valuesForMetric(metric);
+      histogramChart.data.datasets[0].label = metric.label;
+      histogramChart.data.datasets[0].data = values;
+      histogramChart.data.datasets[0].backgroundColor = values.map(value => value >= 0 ? 'rgba(33,150,243,0.7)' : 'rgba(233,30,99,0.7)');
+      histogramChart.data.datasets[0].borderColor = values.map(value => value >= 0 ? 'rgba(33,150,243,1)' : 'rgba(233,30,99,1)');
+      histogramChart.options.scales.y.title.text = metric.axis;
+      histogramChart.options.referenceLinesData = averagesForMetric(metric);
+      histogramChart.update();
+    }
+
+    histogramMetricSelect?.addEventListener('change', event => updateHistogramMetric(event.target.value));
+  }
+
+  Object.entries(datasets).forEach(([key, data]) => {
+    const ctx = document.getElementById('chart-' + key);
+    if (!ctx) return;
+    new Chart(ctx, { type: 'bar', data: {
+      labels: data.map(d => d.label),
+      datasets: [{
+        label: 'P&L', data: data.map(d => d.pnl),
+        backgroundColor: data.map(d => d.pnl >= 0 ? 'rgba(33,150,243,0.6)' : 'rgba(233,30,99,0.6)')
+      }]
+    }, options: {
+      plugins: { legend: { display: false }},
+      scales: {
+        x: { ticks: { color: mutedColor }, grid: { display: false } },
+        y: { ticks: { color: mutedColor }, grid: { color: borderColor } }
+      }
+    }});
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (local data — do not commit)
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+
+# Uploaded images / user files
+static/uploads/
+
+# Obsidian notes (generated)
+obsidian_notes/
+
+# Test / scratch files
+test_interest.csv
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store

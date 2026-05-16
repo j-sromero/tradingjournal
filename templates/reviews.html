@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Weekly Reviews</h1>
+
+<form method="post" class="card trade-form">
+  <div class="grid">
+    <label>Week starting<input type="date" name="week_start" required></label>
+  </div>
+  <label>✅ What worked<textarea name="what_worked" rows="3" class="md"></textarea></label>
+  <label>❌ What didn't<textarea name="what_didnt" rows="3" class="md"></textarea></label>
+  <label>🎯 Focus for next week<textarea name="focus_next_week" rows="3" class="md"></textarea></label>
+  <button class="btn primary" type="submit">Save Review</button>
+</form>
+
+{% for r in reviews %}
+<div class="card">
+  <h3>Week of {{ r.week_start|display_date }}</h3>
+  {% if r.what_worked %}<p><strong>✅ Worked:</strong></p><div class="md-render">{{ r.what_worked }}</div>{% endif %}
+  {% if r.what_didnt %}<p><strong>❌ Didn't:</strong></p><div class="md-render">{{ r.what_didnt }}</div>{% endif %}
+  {% if r.focus_next_week %}<p><strong>🎯 Focus:</strong></p><div class="md-render">{{ r.focus_next_week }}</div>{% endif %}
+</div>
+{% endfor %}
+
+<script>
+  document.querySelectorAll('.md-render').forEach(el => {
+    el.innerHTML = marked.parse(el.textContent);
+  });
+</script>
+{% endblock %}

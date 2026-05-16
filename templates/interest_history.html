@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>📊 Interest History</h1>
+
+<div class="card">
+  <p><strong>Total Net Interest:</strong> ${{ total_net }} &nbsp;|&nbsp; <strong>This Month:</strong> ${{ month_net }}</p>
+
+  {% if entries %}
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Gross Interest</th>
+        <th>Withholding</th>
+        <th>Net</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr>
+        <td>{{ entry.entry_date|display_date }}</td>
+        <td>${{ '%.2f' % entry.gross_interest }}</td>
+        <td>${{ '%.2f' % entry.withholding }}</td>
+        <td class="pos">${{ '%.2f' % entry.net_interest }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No interest entries yet. Import an IBKR CSV/HTM statement to populate this table.</p>
+  {% endif %}
+</div>
+{% endblock %}

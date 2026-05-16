@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Trades</h1>
+<form class="filters" method="get">
+  <input type="text" id="search-input" name="q" placeholder="Search ticker, setup, tag…  (press /)" value="{{ q }}">
+  <select name="status">
+    <option value="">All statuses</option>
+    <option value="open" {% if status=='open' %}selected{% endif %}>Open</option>
+    <option value="closed" {% if status=='closed' %}selected{% endif %}>Closed</option>
+  </select>
+  <select name="setup">
+    <option value="">All setups</option>
+    {% for s in setups %}<option value="{{ s }}" {% if setup==s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  {% if selected_day %}<input type="hidden" name="day" value="{{ selected_day }}">{% endif %}
+  {% if show_individual %}<input type="hidden" name="raw" value="1">{% endif %}
+  {% if selected_campaign %}<input type="hidden" name="campaign" value="{{ selected_campaign }}">{% endif %}
+  <button class="btn">Filter</button>
+</form>
+
+{% if selected_day %}
+  <div class="card filter-summary">
+    <strong>Day filter:</strong> {{ selected_day_label }}
+    <span class="muted">Showing trades where you opened or closed a position on that date.</span>
+    <a class="btn" href="{{ url_for('trades_list', q=q, status=status, setup=setup) }}">Clear day filter</a>
+  </div>
+{% endif %}
+
+{% if raw_group_active %}
+  <div class="card filter-summary">
+    <strong>Position breakdown:</strong> {{ raw_group_label }}
+    <span class="muted">Each row below is one sell leg from this closed position.</span>
+    
+    <a class="btn" href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day) }}#row-{{ raw_group_anchor }}">Back to grouped view</a>
+</div>
+{% endif %}
+
+<div class="card">
+<table>
+  {% if raw_group_active %}
+  <thead>
+    <tr>
+      <th>Sell Date</th><th>Entry Date</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th>
+      <th>Size</th><th>Pos. Value</th><th>P&amp;L</th><th>%</th><th>R</th><th>Setup</th><th>Status</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  <!-- {% set optimal_size = stats.execution.optimal_size %} -->
+  {% for t in trades %}
+    <!-- {% set pos_value = (t.size * t.entry_price) if t.size and t.entry_price else None %}
+    {% set size_delta = (((pos_value / optimal_size) -1) * 100) if pos_value and optimal_size else None %} -->
+    <tr id="row-{{ t.id }}">
+      <td>{{ (t.exit_date or t.entry_date)|display_date }}</td>
+      <td>{{ t.entry_date|display_date }}</td>
+      <td><strong>{{ t.ticker }}</strong></td>
+      <td><span class="badge {{ t.direction }}">{{ t.direction }}</span></td>
+      <td>{{ t.entry_price }}</td>
+      <td>{{ t.exit_price if t.exit_price is not none else '—' }}</td>
+      <td>{{ t.size }}</td>
+      <td>{% set cpv = t.get('campaign_pos_value') %}{% if cpv is not none %}${{ '%.2f' % cpv }}{% else %}—{% endif %}</td>
+      <td class="{{ 'pos' if t.pnl_abs and t.pnl_abs >= 0 else ('neg' if t.pnl_abs else '') }}">
+        {{ '$' ~ ('%.2f' % t.pnl_abs) if t.pnl_abs is not none else '—' }}
+      </td>
+      <td>{{ ('%.2f%%' % t.pnl_pct) if t.pnl_pct is not none else '—' }}</td>
+      <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
+      <td>{{ t.setup or '' }}</td>
+      <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
+      <td>
+        <a href="{{ url_for('trade_detail', tid=t.id) }}">view</a> |
+        <a href="{{ url_for('edit_trade', tid=t.id) }}">edit</a>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="15" style="text-align:center;padding:2rem;">No fills found for this grouped position.</td></tr>
+  {% endfor %}
+  </tbody>
+  {% else %}
+  <thead>
+    <tr>
+      <th>Entry Date</th><th>Exit Date</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th>
+      <th>Size</th><th>Pos. Value</th><th>P&amp;L</th><th>%</th><th>R</th><th>Setup</th><th>Status</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% set optimal_size = stats.execution.optimal_size %}
+  {% for t in trades %}
+    {% set pos_value = (t.size * t.entry_price) if t.size and t.entry_price else None %}
+    {% set size_delta = (((pos_value / optimal_size) -1)* 100) if pos_value and optimal_size else None %}
+    <tr id="row-{{ t.id }}">
+      <td>{{ t.entry_date|display_date }}</td>
+      <td>{{ t.exit_date|display_date if t.exit_date else '—' }}</td>
+      <td>
+        <strong>{{ t.ticker }}</strong>
+        {% if t.is_grouped %}<div class="muted">{{ t.group_count }} fills grouped</div>{% endif %}
+      </td>
+      <td><span class="badge {{ t.direction }}">{{ t.direction }}</span></td>
+      <td>{{ t.entry_price }}</td>
+      <td>{{ t.exit_price if t.exit_price is not none else '—' }}</td>
+      <td>{{ t.size }}</td>
+      <td>{% if pos_value is not none %}${{ '%.2f' % pos_value }}{% else %}—{% endif %}</td>
+      <td class="{{ 'pos' if t.pnl_abs and t.pnl_abs >= 0 else ('neg' if t.pnl_abs else '') }}">
+        {{ '$' ~ ('%.2f' % t.pnl_abs) if t.pnl_abs is not none else '—' }}
+      </td>
+      <td>{{ ('%.2f%%' % t.pnl_pct) if t.pnl_pct is not none else '—' }}</td>
+      <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
+      <td>{{ t.setup or '' }}</td>
+      <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
+      <td>
+        {% if t.is_grouped %}
+          <a href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, raw=1, campaign=t.campaign_id) }}">fills</a>
+        {% else %}
+          <a href="{{ url_for('trade_detail', tid=t.id, back_row=t.id) }}">view</a> |
+          <a href="{{ url_for('edit_trade', tid=t.id) }}">edit</a>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="15" style="text-align:center;padding:2rem;">No trades yet. <a href="{{ url_for('new_trade') }}">Add your first one →</a></td></tr>
+  {% endfor %}
+  </tbody>
+  {% endif %}
+</table>
+</div>
+
+<style>
+tr:target {
+  scroll-margin-top: 110px;
+  animation: highlight-fade 3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes highlight-fade {
+  0%   { background: rgba(74,222,128,0.25);}
+  40%  { background: rgba(74,222,128,0.25);}
+  100% { background: transparent; outline: none; }
+}
+</style>
+
+{% endblock %}
+

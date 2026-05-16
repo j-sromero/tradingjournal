@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>⚙️ Settings</h1>
+<form method="post" class="trade-form card">
+  <fieldset>
+    <legend>💰 Account</legend>
+    <label>Starting capital ($)<input type="number" step="any" name="starting_capital" value="{{ s.starting_capital }}"></label>
+    <label>Monthly P&amp;L goal ($)<input type="number" step="any" name="monthly_goal" value="{{ s.monthly_goal }}"></label>
+    <p class="muted">Interest entries are auto-parsed from CSV imports (USD Credit Interest and Withholding rows).</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>🚨 Risk Rules</legend>
+    <label>Daily loss limit (% of account)<input type="number" step="0.1" name="daily_loss_limit_pct" value="{{ s.daily_loss_limit_pct }}"></label>
+    <label>Max trades per day<input type="number" name="max_trades_per_day" value="{{ s.max_trades_per_day }}"></label>
+    <label>Max consecutive losses before warning<input type="number" name="max_consecutive_losses" value="{{ s.max_consecutive_losses }}"></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>📝 Obsidian Integration</legend>
+    <label class="checkbox">
+      <input type="checkbox" name="obsidian_export_enabled" {% if s.obsidian_export_enabled == '1' %}checked{% endif %}>
+      Auto-create a Markdown note for each trade in <code>obsidian_notes/</code>
+    </label>
+    <p class="muted">Tip: place this app inside your Obsidian vault to access notes directly. Notes are regenerated each time you save the trade.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>🎨 Appearance</legend>
+    <label>Theme
+      <select name="theme">
+        <option value="dark" {% if s.theme == 'dark' %}selected{% endif %}>Dark</option>
+        <option value="light" {% if s.theme == 'light' %}selected{% endif %}>Light</option>
+      </select>
+    </label>
+  </fieldset>
+
+  <button class="btn primary">Save Settings</button>
+</form>
+{% endblock %}
