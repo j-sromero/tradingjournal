@@ -119,7 +119,8 @@ def _parse_dt(a):
 
 
 def _is_close_only_execution(a: dict) -> bool:
-    """Best-effort detection of close-only fills in Flex XML attributes."""
+    """Best-effort detection of close-only fills in Flex XML attributes.
+    For TradeConfirm, a SELL with no openCloseIndicator attrs is assumed close-only."""
     checks = [
         a.get("openCloseIndicator"),
         a.get("openClose"),
@@ -128,7 +129,9 @@ def _is_close_only_execution(a: dict) -> bool:
     ]
     text = " ".join(str(v or "").upper() for v in checks).strip()
     if not text:
-        return False
+        # No explicit open/close indicator — assume it's close-only if it's a SELL
+        # (TradeConfirm XML often lacks these fields)
+        return (a.get("buySell") or "").upper() == "SELL"
     # Common values seen in broker exports.
     close_tokens = ("CLOSE", "CLOSING", "C")
     return any(tok in text.split() or tok in text for tok in close_tokens)

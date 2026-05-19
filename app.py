@@ -317,6 +317,84 @@ def _cleanup_existing_ibkr_duplicates(db):
         db.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", dup_ids)
     return len(dup_ids)
 
+
+def _remove_matching_ibkr_open_leg(db, closed_trade):
+    """Retire or reduce a previously imported IBKR open leg when close legs arrive."""
+    exec_id = (closed_trade.get("exec_id") or "").strip()
+    if "__" not in exec_id:
+        return 0
+
+    parts = exec_id.split("__")
+    if len(parts) < 3:
+        return 0
+
+    entry_exec_id = parts[0]
+    try:
+        closed_qty = float(parts[-1])
+    except Exception:
+        closed_qty = None
+
+    row = db.execute(
+        """
+        SELECT id, size, fees, tags
+        FROM trades
+        WHERE setup='IBKR import'
+          AND status='open'
+          AND UPPER(COALESCE(ticker, '')) = ?
+          AND LOWER(COALESCE(direction, '')) = ?
+          AND COALESCE(entry_date, '') = ?
+          AND ABS(COALESCE(entry_price, 0) - ?) < 1e-6
+          AND COALESCE(tags, '') LIKE ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (
+            (closed_trade.get("ticker") or "").upper(),
+            (closed_trade.get("direction") or "").lower(),
+            closed_trade.get("entry_date") or "",
+            float(closed_trade.get("entry_price") or 0),
+            f"%ibkr-id:{entry_exec_id}__open__%",
+        ),
+    ).fetchone()
+
+    if not row:
+        return 0
+
+    open_id = row["id"]
+    open_size = float(row["size"] or 0)
+    open_fees = float(row["fees"] or 0)
+    open_tags = row["tags"] or ""
+
+    # Unknown/invalid close size -> safest is to remove the matched open leg.
+    if closed_qty is None or closed_qty <= 0:
+        cur = db.execute("DELETE FROM trades WHERE id=?", (open_id,))
+        return cur.rowcount or 0
+
+    remaining = open_size - closed_qty
+    if remaining <= 1e-9:
+        cur = db.execute("DELETE FROM trades WHERE id=?", (open_id,))
+        return cur.rowcount or 0
+
+    # Partial close: keep open leg with reduced size and proportional remaining fees.
+    remaining_fees = open_fees * (remaining / open_size) if open_size > 0 else open_fees
+    marker_prefix = f"ibkr-id:{entry_exec_id}__open__"
+    updated_tags = []
+    replaced = False
+    for tag in [t.strip() for t in open_tags.split(",") if t.strip()]:
+        if tag.startswith(marker_prefix):
+            updated_tags.append(f"{marker_prefix}{round(remaining, 10)}")
+            replaced = True
+        else:
+            updated_tags.append(tag)
+    if not replaced:
+        updated_tags.append(f"{marker_prefix}{round(remaining, 10)}")
+
+    cur = db.execute(
+        "UPDATE trades SET size=?, fees=?, tags=? WHERE id=?",
+        (remaining, round(remaining_fees, 4), ",".join(updated_tags), open_id),
+    )
+    return cur.rowcount or 0
+
 @app.route("/ibkr", methods=["GET", "POST"])
 def ibkr_import():
     if request.method == "POST":
@@ -359,6 +437,9 @@ def ibkr_import():
 
             n_closed = n_open = n_dedup = 0
             for t in closed:
+                # If this close leg exists, retire matching previously-imported open leg.
+                _remove_matching_ibkr_open_leg(db, t)
+
                 fp = _trade_fingerprint({
                     "ticker": t["ticker"],
                     "direction": t["direction"],
@@ -390,8 +471,6 @@ def ibkr_import():
                 if (
                     t["exec_id"] in existing
                     or fp in existing_fingerprints
-                    or fp_coarse in existing_fingerprints_coarse
-                    or fp_fuzzy in existing_fingerprints_fuzzy
                 ):
                     n_dedup += 1
                     continue
@@ -433,8 +512,6 @@ def ibkr_import():
                 if (
                     t["exec_id"] in existing
                     or fp in existing_fingerprints
-                    or fp_coarse in existing_fingerprints_coarse
-                    or fp_fuzzy in existing_fingerprints_fuzzy
                 ):
                     n_dedup += 1
                     continue
