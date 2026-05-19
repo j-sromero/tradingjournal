@@ -302,6 +302,17 @@ a:hover {
   line-height: 1.2;
 }
 
+.btn-sm {
+  font-size: 0.8em;
+  padding: 0.2em 0.6em;
+}
+
+.btn-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .btn:hover,
 .btn:focus {
   background: var(--panel2);

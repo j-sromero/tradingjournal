@@ -146,14 +146,6 @@ def init_db():
         caption TEXT,
         FOREIGN KEY(trade_id) REFERENCES trades(id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        week_start TEXT NOT NULL,
-        what_worked TEXT,
-        what_didnt TEXT,
-        focus_next_week TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -2105,23 +2097,41 @@ def v3_import():
 def calendar_view():
     year = int(request.args.get("year", date.today().year))
     month = int(request.args.get("month", date.today().month))
-    trades = all_trades_dicts()
-    # closed = closed_trades(trades)
-    all_campaigns = build_trade_campaigns(trades)
-    closed_campaigns = [aggregate_trade_campaign(c) for c in all_campaigns if all(t["status"] == "closed" for t in c["trades"])]
-    all_agg = [aggregate_trade_campaign(c) for c in all_campaigns]
-    
     daily = defaultdict(lambda: {"pnl": 0, "count": 0})
-    for t in all_agg:  # ← campaigns, no fills
-        activity_days = {(t["entry_date"] or "")[:10]}
-        if t.get("exit_date"):
-            activity_days.add(t["exit_date"][:10])
-        for day in activity_days:
-            if day:
+
+    def _v3_day(dt_text):
+        text = (dt_text or "").strip()
+        if len(text) >= 8 and text[:8].isdigit():
+            return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+        return (text or "")[:10] or None
+
+    if os.path.exists(V3_DB_PATH):
+        conn = sqlite3.connect(V3_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission FROM trades"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for r in rows:
+            entry_day = _v3_day(r["entry_datetime"])
+            exit_day = _v3_day(r["exit_datetime"])
+            activity_days = set()
+            if entry_day:
+                activity_days.add(entry_day)
+            if exit_day:
+                activity_days.add(exit_day)
+            for day in activity_days:
                 daily[day]["count"] += 1
-    for t in closed_campaigns:  # ← campaigns, no fills
-        day = (t["exit_date"] or t["entry_date"])[:10]
-        daily[day]["pnl"] += t["pnl_abs"]
+            if exit_day and r["exit_price"] is not None:
+                size = float(r["quantity"] or 0)
+                entry_price = float(r["entry_price"] or 0)
+                exit_price = float(r["exit_price"] or 0)
+                fees = float(r["ib_commission"] or 0)
+                pnl = (exit_price - entry_price) * size - fees
+                daily[exit_day]["pnl"] += pnl
 
     # Build month grid (weeks)
     import calendar as cal
@@ -2862,20 +2872,20 @@ def backup_zip():
     return send_file(buf, mimetype="application/zip", as_attachment=True,
                      download_name=f"trading-journal-backup-{date.today().isoformat()}.zip")
 
-# ---------- Reviews ----------
-@app.route("/reviews", methods=["GET", "POST"])
-def reviews():
-    db = get_db()
-    if request.method == "POST":
-        f = request.form
-        db.execute("""INSERT INTO reviews (week_start, what_worked, what_didnt, focus_next_week)
-                      VALUES (?,?,?,?)""",
-                   (f["week_start"], f.get("what_worked"), f.get("what_didnt"), f.get("focus_next_week")))
-        db.commit()
-        flash("Review saved ✅", "success")
-        return redirect(url_for("reviews"))
-    rows = db.execute("SELECT * FROM reviews ORDER BY week_start DESC").fetchall()
-    return render_template("reviews.html", reviews=rows)
+# # ---------- Reviews ----------
+# @app.route("/reviews", methods=["GET", "POST"])
+# def reviews():
+#     db = get_db()
+#     if request.method == "POST":
+#         f = request.form
+#         db.execute("""INSERT INTO reviews (week_start, what_worked, what_didnt, focus_next_week)
+#                       VALUES (?,?,?,?)""",
+#                    (f["week_start"], f.get("what_worked"), f.get("what_didnt"), f.get("focus_next_week")))
+#         db.commit()
+#         flash("Review saved ✅", "success")
+#         return redirect(url_for("reviews"))
+#     rows = db.execute("SELECT * FROM reviews ORDER BY week_start DESC").fetchall()
+#     return render_template("reviews.html", reviews=rows)
 
 # # ---------- Replay ----------
 # @app.route("/replay")

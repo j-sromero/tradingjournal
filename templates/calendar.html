@@ -16,10 +16,14 @@
   {% for week in grid %}
     {% for day in week %}
       {% if day %}
-        <a href="{{ url_for('trades_list', day=day.date) }}" class="cal-day {% if day.pnl > 0 %}pos-bg{% elif day.pnl < 0 %}neg-bg{% endif %}" title="View trades with activity on {{ day.date }}">
+        <a href="{{ url_for('v3_trades_list', day=day.date) }}" class="cal-day {% if day.pnl > 0 %}pos-bg{% elif day.pnl < 0 %}neg-bg{% endif %}" title="View trades with activity on {{ day.date }}">
           <div class="cal-num">{{ day.day }}</div>
           {% if day.count %}
-            <div class="cal-pnl {{ 'pos' if day.pnl >= 0 else 'neg' }}">${{ day.pnl }}</div>
+            {% if day.pnl != 0 %}
+              <div class="cal-pnl {{ 'pos' if day.pnl >= 0 else 'neg' }}">${{ day.pnl }}</div>
+            {% else %}
+              <div class="cal-pnl">&nbsp;</div>
+            {% endif %}
             <div class="cal-count">{{ day.count }} trade{{ '' if day.count == 1 else 's' }}</div>
           {% endif %}
         </a>
