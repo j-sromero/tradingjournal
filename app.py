@@ -1911,9 +1911,61 @@ def api_position_size():
 # ---------- Analytics ----------
 @app.route("/analytics")
 def analytics():
-    trades = all_trades_dicts()
-    closed = closed_trades(trades)
-    closed_positions = [aggregate_trade_campaign(c) for c in build_trade_campaigns(closed)]
+    closed_positions = []
+
+    def _to_iso(dt_text):
+        text = (dt_text or "").strip()
+        if len(text) >= 12 and text[:12].isdigit():
+            return f"{text[0:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}"
+        return text or None
+
+    if os.path.exists(V3_DB_PATH):
+        conn = sqlite3.connect(V3_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission
+                FROM trades
+                WHERE exit_datetime IS NOT NULL
+                  AND exit_price IS NOT NULL
+                ORDER BY entry_datetime ASC, id ASC
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for r in rows:
+            size = float(r["quantity"] or 0)
+            entry_price = float(r["entry_price"] or 0)
+            exit_price = float(r["exit_price"] or 0)
+            fees = float(r["ib_commission"] or 0)
+
+            pnl_abs = (exit_price - entry_price) * size - fees
+            cost = entry_price * size
+            pnl_pct = (pnl_abs / cost * 100) if cost else None
+
+            closed_positions.append(
+                {
+                    "id": int(r["id"]),
+                    "ticker": r["symbol"],
+                    "direction": "long",
+                    "entry_date": _to_iso(r["entry_datetime"]),
+                    "exit_date": _to_iso(r["exit_datetime"]),
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(exit_price, 4),
+                    "size": round(size, 4),
+                    "fees": round(fees, 4),
+                    "setup": "v3 import",
+                    "emotion": None,
+                    "market": None,
+                    "followed_plan": None,
+                    "status": "closed",
+                    "pnl_abs": round(pnl_abs, 4),
+                    "pnl_pct": None if pnl_pct is None else round(pnl_pct, 4),
+                    "r_multiple": None,
+                }
+            )
 
     def group_pnl(key_fn):
         d = defaultdict(lambda: {"pnl": 0, "count": 0, "wins": 0})
@@ -1930,8 +1982,8 @@ def analytics():
     by_emotion = group_pnl(lambda t: t["emotion"])
     by_asset = group_pnl(lambda t: t["ticker"])
     by_market = group_pnl(lambda t: t["market"])
-    by_dow = group_pnl(lambda t: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][datetime.fromisoformat((t["exit_date"] or t["entry_date"]).replace("Z","")).weekday()])
-    by_hour = group_pnl(lambda t: f"{datetime.fromisoformat(t['entry_date'].replace('Z','')).hour:02d}:00")
+    by_dow = group_pnl(lambda t: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][(parse_trade_datetime(t["exit_date"] or t["entry_date"]) or datetime.min).weekday()])
+    by_hour = group_pnl(lambda t: f"{(parse_trade_datetime(t['entry_date']) or datetime.min).hour:02d}:00")
     by_plan = group_pnl(lambda t: "Followed plan ✅" if t["followed_plan"] == 1 else ("Broke plan ❌" if t["followed_plan"] == 0 else "—"))
     ordered_trades = sorted(closed_positions, key=lambda t: (t["exit_date"] or t["entry_date"], t["entry_date"], t["id"]))
     trade_histogram = [
