@@ -1236,6 +1236,7 @@ def trades_list():
     status = request.args.get("status", "")
     setup = request.args.get("setup", "")
     selected_day = normalize_iso_day(request.args.get("day", "").strip())
+    merge_open = request.args.get("merge_open") == "1"
     show_individual = request.args.get("raw") == "1"
     selected_campaign = request.args.get("campaign", "").strip()
     sql = "SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%')"
@@ -1258,6 +1259,40 @@ def trades_list():
     campaigns = build_trade_campaigns(filtered_trades)
     campaign_map = {campaign["campaign_id"]: campaign for campaign in campaigns}
     trades = [aggregate_trade_campaign(campaign) for campaign in campaigns]
+
+    if merge_open:
+        merged_trades = []
+        merged_open = {}
+        open_order = []
+        for trade in trades:
+            if trade.get("status") != "open":
+                merged_trades.append(trade)
+                continue
+            merge_key = (trade.get("ticker"), trade.get("direction") or "")
+            if merge_key not in merged_open:
+                merged_open[merge_key] = dict(trade)
+                merged_open[merge_key]["_entry_notional"] = float(trade.get("entry_price") or 0) * float(trade.get("size") or 0)
+                open_order.append(merge_key)
+                continue
+            current = merged_open[merge_key]
+            current_size = float(current.get("size") or 0)
+            trade_size = float(trade.get("size") or 0)
+            current_entry_notional = float(current.get("_entry_notional") or 0)
+            trade_entry_notional = float(trade.get("entry_price") or 0) * trade_size
+            combined_size = current_size + trade_size
+            current["size"] = round(combined_size, 4)
+            current["entry_price"] = round((current_entry_notional + trade_entry_notional) / combined_size, 4) if combined_size else current.get("entry_price")
+            current["_entry_notional"] = current_entry_notional + trade_entry_notional
+            current["fees"] = round(float(current.get("fees") or 0) + float(trade.get("fees") or 0), 4)
+            if trade.get("entry_date") and (not current.get("entry_date") or trade["entry_date"] < current["entry_date"]):
+                current["entry_date"] = trade["entry_date"]
+            current["is_grouped"] = True
+            current["group_count"] = int(current.get("group_count") or 1) + int(trade.get("group_count") or 1)
+            current["_entry_notional"] = round(current["_entry_notional"], 10)
+        for trade in merged_open.values():
+            trade.pop("_entry_notional", None)
+        merged_trades.extend(merged_open[key] for key in open_order)
+        trades = sorted(merged_trades, key=lambda t: t.get("entry_date") or "", reverse=True)
 
     if show_individual and selected_campaign in campaign_map:
         selected_camp = campaign_map[selected_campaign]
@@ -1324,6 +1359,7 @@ def trades_list():
         raw_group_label=raw_group_label,
         raw_group_anchor=raw_group_anchor,
         selected_campaign=selected_campaign,
+        merge_open=merge_open,
         stats=stats,
         v3_mode=False,
     )
@@ -1335,6 +1371,7 @@ def v3_trades_list():
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "")
     selected_day = normalize_iso_day(request.args.get("day", "").strip())
+    merge_open = request.args.get("merge_open") == "1"
 
     conn = sqlite3.connect(V3_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -1366,6 +1403,46 @@ def v3_trades_list():
         if len(text) >= 12 and text[:12].isdigit():
             return f"{text[0:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}"
         return text or None
+
+    def _merge_open_trades(rows_data):
+        merged = {}
+        order = []
+
+        for row in rows_data:
+            if row["exit_datetime"] is not None:
+                merged_key = (int(row["id"]),)
+            else:
+                merged_key = (row["symbol"], "open")
+
+            if merged_key not in merged:
+                merged[merged_key] = dict(row)
+                merged[merged_key]["_entry_notional"] = float(row["entry_price"] or 0) * float(row["quantity"] or 0)
+                order.append(merged_key)
+                continue
+
+            current = merged[merged_key]
+            current_quantity = float(current["quantity"] or 0)
+            row_quantity = float(row["quantity"] or 0)
+            current_entry_notional = float(current.get("_entry_notional") or 0)
+            row_entry_notional = float(row["entry_price"] or 0) * row_quantity
+            combined_quantity = current_quantity + row_quantity
+            current["quantity"] = combined_quantity
+            current["entry_price"] = (current_entry_notional + row_entry_notional) / combined_quantity if combined_quantity else float(current["entry_price"] or 0)
+            current["_entry_notional"] = current_entry_notional + row_entry_notional
+            if current["exit_price"] is None:
+                current["exit_price"] = row["exit_price"]
+            current["ib_commission"] = float(current["ib_commission"] or 0) + float(row["ib_commission"] or 0)
+            if row["entry_datetime"] and (not current["entry_datetime"] or row["entry_datetime"] < current["entry_datetime"]):
+                current["entry_datetime"] = row["entry_datetime"]
+            if row["exit_datetime"] and (not current["exit_datetime"] or row["exit_datetime"] > current["exit_datetime"]):
+                current["exit_datetime"] = row["exit_datetime"]
+
+        for item in merged.values():
+            item.pop("_entry_notional", None)
+        return [merged[key] for key in order]
+
+    if merge_open:
+        rows = _merge_open_trades(rows)
 
     trades = []
     for r in rows:
@@ -1418,6 +1495,7 @@ def v3_trades_list():
         raw_group_label=None,
         raw_group_anchor=None,
         selected_campaign="",
+        merge_open=merge_open,
         stats=stats,
         v3_mode=True,
     )
