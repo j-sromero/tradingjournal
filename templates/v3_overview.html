@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}v3 Overview · Trading Journal{% endblock %}
+
+{% block content %}
+
+{% if not v3_available %}
+<div class="card">
+  <p style="margin:0;">No v3 trades table found yet. Run the importer first and refresh this page.</p>
+</div>
+{% else %}
+<div class="grid" style="margin-bottom:1rem;">
+  <div class="card"><strong>Total rows</strong><div style="font-size:1.4rem;">{{ summary.total_rows }}</div></div>
+  <div class="card"><strong>Closed rows</strong><div style="font-size:1.4rem;">{{ summary.closed_rows }}</div></div>
+  <div class="card"><strong>Open rows</strong><div style="font-size:1.4rem;">{{ summary.open_rows }}</div></div>
+  <div class="card"><strong>Symbols</strong><div style="font-size:1.4rem;">{{ summary.symbols }}</div></div>
+</div>
+
+<div class="card" style="margin-bottom:1rem;">
+  <h2 style="margin-top:0;">Quick totals</h2>
+  <p style="margin:0.35rem 0;">Realized P&amp;L (closed rows):
+    <strong class="{{ 'pos' if summary.realized_pnl >= 0 else 'neg' }}">${{ '%.2f'|format(summary.realized_pnl) }}</strong>
+  </p>
+  <p style="margin:0.35rem 0;">Total commissions: <strong>${{ '%.2f'|format(summary.total_commission) }}</strong></p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0;">Recent imported rows</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Entry</th>
+        <th>Exit</th>
+        <th>Qty</th>
+        <th>Entry Price</th>
+        <th>Exit Price</th>
+        <th>Commission</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in recent_rows %}
+      <tr>
+        <td>{{ r.symbol }}</td>
+        <td>{{ r.entry_datetime }}</td>
+        <td>{{ r.exit_datetime }}</td>
+        <td>{{ '%.2f'|format(r.quantity) }}</td>
+        <td>${{ '%.2f'|format(r.entry_price) }}</td>
+        <td>{% if r.exit_price is none %}—{% else %}${{ '%.2f'|format(r.exit_price) }}{% endif %}</td>
+        <td>${{ '%.2f'|format(r.ib_commission) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

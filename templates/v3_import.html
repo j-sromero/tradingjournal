@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}v3 Import · Trading Journal{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2 style="margin-top:0;">Choose input method</h2>
+  <p class="muted" style="margin-top:0;">Flex token/query ID are read from SQLite settings. This page does not edit credentials.</p>
+
+  <p style="margin:0.5rem 0 1rem 0;">
+    Flex status:
+    {% if flex_configured %}
+      <strong class="pos">Configured ✅</strong>
+    {% else %}
+      <strong class="neg">Missing credentials ⚠️</strong>
+    {% endif %}
+  </p>
+
+  <form method="post" enctype="multipart/form-data" class="trade-form" style="gap:0.8rem;" id="v3-import-form">
+    <label>Input method
+      <select name="source_mode" id="source_mode" required>
+        <option value="flex">Flex Query (uses stored token/query ID)</option>
+        <option value="html">HTML Statement Upload</option>
+      </select>
+    </label>
+
+    <div id="html-file-group" style="display:none;">
+      <label>Attach HTML Statement (.htm/.html)
+        <input type="file" name="html_file" id="html_file" accept=".htm,.html,text/html">
+      </label>
+    </div>
+
+    <button class="btn primary" type="submit">Run Import</button>
+  </form>
+
+  <script>
+    (() => {
+      const modeEl = document.getElementById('source_mode');
+      const htmlGroupEl = document.getElementById('html-file-group');
+      const htmlFileEl = document.getElementById('html_file');
+
+      function syncModeUi() {
+        const isHtml = modeEl && modeEl.value === 'html';
+        if (htmlGroupEl) htmlGroupEl.style.display = isHtml ? 'block' : 'none';
+        if (htmlFileEl) htmlFileEl.required = isHtml;
+      }
+
+      if (modeEl) {
+        modeEl.addEventListener('change', syncModeUi);
+        syncModeUi();
+      }
+    })();
+  </script>
+</div>
+{% endblock %}

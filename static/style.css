@@ -1303,7 +1303,7 @@ tbody tr:last-child td {
   color: var(--text);
 }
 
-/* ---------- Replay ---------- */
+/* ---------- Replay ----------
 .replay-controls {
   display: flex;
   align-items: center;
@@ -1344,7 +1344,7 @@ tbody tr:last-child td {
   background: var(--panel2);
   border-radius: 8px;
   border-left: 3px solid var(--primary);
-}
+} */
 
 /* ---------- Keyboard / Shortcuts ---------- */
 kbd {

@@ -1,0 +1,402 @@
+{% extends "base.html" %}
+{% block title %}v3 Chart · {{ symbol }}{% endblock %}
+
+{% block content %}
+<div class="card" style="margin-bottom:1rem; display:flex; gap: 3rem; align-items:center; flex-wrap:wrap;">
+  <div><strong> {{ symbol }} </strong> </div>
+  <div><strong>Entry:</strong> {{ entry_hint }} @ {{ entry_price_hint }}</div>
+  <div><strong>Exit:</strong> {{ exit_hint }} @ {{ exit_price_hint }}</div>
+  <div style="margin-left:auto; display:flex; gap:.5rem; align-items:center;">
+    <label for="iv_select" style="font-size:.85rem;">Interval:</label>
+    <select id="iv_select" style="padding:.25rem .5rem; border-radius:4px; background:#1e222d; color:#d1d4dc; border:1px solid #363a45;">
+      <option value="5m">5 min</option>
+      <option value="15m">15 min</option>
+      <option value="1h" selected>1 hour</option>
+      <option value="1d">Daily</option>
+    </select>
+    <button id="log_toggle" style="padding:.25rem .75rem; border-radius:4px; background:#1e222d; color:#d1d4dc; border:1px solid #363a45; cursor:pointer; font-size:.85rem;">Log</button>
+  </div>
+</div>
+
+<div class="card" style="padding:0; overflow:hidden;">
+  <div id="lw_chart" style="height:720px; width:100%;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+(function () {
+  const SYMBOL   = {{ symbol | tojson }};
+  const ENTRY_HINT = {{ entry_hint | tojson }};
+  const EXIT_HINT = {{ exit_hint | tojson }};
+  const ENTRY_EPOCH = {{ entry_epoch | tojson }};
+  const EXIT_EPOCH = {{ exit_epoch | tojson }};
+  const ET_TIMEZONE = "America/New_York";
+  const ivSelect = document.getElementById("iv_select");
+
+  function toEpochSeconds(time) {
+    if (typeof time === "number") return time;
+    if (time && typeof time === "object" && "year" in time && "month" in time && "day" in time) {
+      return Math.floor(Date.UTC(time.year, time.month - 1, time.day) / 1000);
+    }
+    return null;
+  }
+
+  function formatEtTime(epochSec, withTime) {
+    const dt = new Date(epochSec * 1000);
+    if (withTime) {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: ET_TIMEZONE,
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(dt);
+    }
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: ET_TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(dt);
+  }
+
+  function parseHintSeconds(text) {
+    // Expected from backend: "YYYY-MM-DD HH:MM"
+    const m = (text || "").match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    const [_, y, mo, d, h, mi] = m;
+    const ms = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), 0);
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+  }
+
+  function resolveHintSeconds(epochValue, hintText) {
+    if (typeof epochValue === "number" && Number.isFinite(epochValue)) return epochValue;
+    return parseHintSeconds(hintText);
+  }
+
+  function intervalToSeconds(interval) {
+    if (interval === "5m") return 5 * 60;
+    if (interval === "15m") return 15 * 60;
+    if (interval === "1h") return 60 * 60;
+    return 24 * 60 * 60; // 1d default
+  }
+
+  function dayKey(sec) {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: ET_TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(sec * 1000));
+  }
+
+  function findCandleIndexForTime(candles, targetSec, interval) {
+    if (!candles || !candles.length || targetSec == null) return -1;
+
+    if (interval === "1d") {
+      const targetDay = dayKey(targetSec);
+      for (let i = 0; i < candles.length; i++) {
+        if (dayKey(candles[i].time) === targetDay) return i;
+      }
+      return -1;
+    }
+
+    // Intraday: nearest candle by timestamp.
+    let bestIdx = 0;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < candles.length; i++) {
+      const d = Math.abs(candles[i].time - targetSec);
+      if (d < bestDiff) {
+        bestDiff = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  function buildTradeMarkers(candles, interval) {
+    const markers = [];
+    const entrySec = resolveHintSeconds(ENTRY_EPOCH, ENTRY_HINT);
+    const exitSec = resolveHintSeconds(EXIT_EPOCH, EXIT_HINT);
+
+    const entryIdx = findCandleIndexForTime(candles, entrySec, interval);
+    if (entryIdx >= 0) {
+      markers.push({
+        time: candles[entryIdx].time,
+        position: "belowBar",
+        color: "#22c55e",
+        shape: "arrowUp",
+        text: "ENTRY",
+      });
+    }
+
+    const exitIdx = findCandleIndexForTime(candles, exitSec, interval);
+    if (exitIdx >= 0) {
+      markers.push({
+        time: candles[exitIdx].time,
+        position: "aboveBar",
+        color: "#ef4444",
+        shape: "arrowDown",
+        text: "EXIT",
+      });
+    }
+
+    return markers;
+  }
+
+  function applyEntryWindowOrFit(candles, interval) {
+    if (!candles || !candles.length) {
+      chart.timeScale().fitContent();
+      return;
+    }
+
+    const entrySec = resolveHintSeconds(ENTRY_EPOCH, ENTRY_HINT);
+    if (!entrySec) {
+      chart.timeScale().fitContent();
+      return;
+    }
+
+    // Find nearest candle index to entry timestamp.
+    let entryIndex = 0;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < candles.length; i++) {
+      const d = Math.abs(candles[i].time - entrySec);
+      if (d < bestDiff) {
+        bestDiff = d;
+        entryIndex = i;
+      }
+    }
+
+    const isDaily = interval === "1d";
+    const intervalSec = intervalToSeconds(interval);
+    const halfWindowBars = isDaily
+      ? Math.max(10, Math.round((182 * 24 * 60 * 60) / intervalSec)) // ~6 months on daily
+      : ({ "1h": 72, "15m": 192, "5m": 288 }[interval] || 72);   // tighter intraday window
+    const rightPadBars = isDaily ? 20 : 1;
+    const fullWindowBars = Math.max(30, halfWindowBars * 2);
+
+    // Check if there's enough data to the right of entry for centering.
+    // If data to right < halfWindowBars, it's a recent trade → use trailing window.
+    const dataToRight = (candles.length - 1) - entryIndex;
+    const hasEnoughDataRight = dataToRight >= halfWindowBars;
+
+    if (!hasEnoughDataRight) {
+      // Recent trade: trailing window with right padding
+      const to = (candles.length - 1) + rightPadBars;
+      const from = Math.max(0, to - fullWindowBars);
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+      return;
+    }
+
+    // Old trade: center the entry
+    chart.timeScale().setVisibleLogicalRange({
+      from: entryIndex - halfWindowBars,
+      to: entryIndex + halfWindowBars + rightPadBars,
+    });
+  }
+
+  // ── chart setup ────────────────────────────────────────────────
+  const container = document.getElementById("lw_chart");
+  const chart = LightweightCharts.createChart(container, {
+    layout:     { background: { color: "#131722" }, textColor: "#d1d4dc" },
+    grid:       { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+    crosshair:  { mode: LightweightCharts.CrosshairMode.Normal },
+    localization: {
+      locale: "en-US",
+      timeFormatter: (time) => {
+        const sec = toEpochSeconds(time);
+        if (sec == null) return "";
+        const isDaily = ivSelect.value === "1d";
+        return formatEtTime(sec, !isDaily);
+      },
+    },
+    rightPriceScale: {
+      borderColor: "#363a45",
+      autoScale: true,
+      scaleMargins: { top: 0.01, bottom: 0.01 },
+    },
+    timeScale:  {
+      borderColor: "#363a45",
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 0,
+      tickMarkFormatter: (time) => {
+        const sec = toEpochSeconds(time);
+        if (sec == null) return "";
+        const isDaily = ivSelect.value === "1d";
+        if (isDaily) {
+          return new Intl.DateTimeFormat("en-US", {
+            timeZone: ET_TIMEZONE,
+            month: "2-digit",
+            day: "2-digit",
+          }).format(new Date(sec * 1000));
+        }
+        return new Intl.DateTimeFormat("en-US", {
+          timeZone: ET_TIMEZONE,
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(new Date(sec * 1000));
+      },
+    },
+    width:  container.clientWidth,
+    height: container.clientHeight,
+  });
+
+  // Default to logarithmic mode on the right price scale
+  chart.priceScale("right").applyOptions({
+    mode: LightweightCharts.PriceScaleMode.Logarithmic,
+  });
+
+  // Resize with container
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+  }).observe(container);
+
+  // ── series ─────────────────────────────────────────────────────
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: "#26a69a", downColor: "#ef5350",
+    borderUpColor: "#26a69a", borderDownColor: "#ef5350",
+    wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+  });
+
+  const volumeSeries = chart.addHistogramSeries({
+    priceFormat: { type: "volume" },
+    priceScaleId: "vol",
+    scaleMargins: { top: 0.85, bottom: 0 },
+  });
+  chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+
+  const ema10Series = chart.addLineSeries({
+    color: "#4FC3F7", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const ema21Series = chart.addLineSeries({
+    color: "#FF9800", lineWidth: 2, 
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const sma50Series = chart.addLineSeries({
+    color: "#F44336", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const sma200Series = chart.addLineSeries({
+    color: "#FFFFFF", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const vwapSeries = chart.addLineSeries({
+    color: "#ffffff", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const priceSeries = chart.addLineSeries({
+    color: "#94a3b8", lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false,
+    lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const ema6Series = chart.addLineSeries({
+    color: "#22d3ee", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  const ema20Series = chart.addLineSeries({
+    color: "#f59e0b", lineWidth: 2,
+    priceLineVisible: false, lastValueVisible: true,
+    autoscaleInfoProvider: () => null,
+  });
+
+  // ── load data ──────────────────────────────────────────────────
+  let loading = false;
+  let currentInterval = ivSelect.value;
+
+  function syncLegend(interval) {
+    const showDaily = interval === "1d";
+    document.querySelectorAll(".legend-daily").forEach((node) => {
+      node.style.display = showDaily ? "inline-block" : "none";
+    });
+    document.querySelectorAll(".legend-intraday").forEach((node) => {
+      node.style.display = showDaily ? "none" : "inline-block";
+    });
+  }
+
+  function resetScalesForTimeframeChange() {
+    // Reset Y scale (price) to autoscale after any manual zoom/drag.
+    chart.priceScale("right").applyOptions({
+      autoScale: true,
+      scaleMargins: { top: 0.03, bottom: 0.03 },
+    });
+  }
+
+  function loadData(interval) {
+    if (loading) return;
+    loading = true;
+    container.style.opacity = "0.4";
+
+    fetch(`/api/v3/ohlcv?symbol=${encodeURIComponent(SYMBOL)}&interval=${interval}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { alert("Error: " + data.error); return; }
+        candleSeries.setData(data.candles);
+        candleSeries.setMarkers(buildTradeMarkers(data.candles, interval));
+        volumeSeries.setData(data.volume);
+        const isDaily = interval === "1d";
+        priceSeries.setData(isDaily ? [] : (data.price || []));
+        vwapSeries.setData(isDaily ? [] : (data.session_vwap || []));
+        ema6Series.setData(isDaily ? [] : (data.ema6 || []));
+        ema20Series.setData(isDaily ? [] : (data.ema20 || []));
+        ema10Series.setData(isDaily ? (data.ema10 || []) : []);
+        ema21Series.setData(isDaily ? (data.ema21 || []) : []);
+        sma50Series.setData(isDaily ? (data.sma50 || []) : []);
+        sma200Series.setData(isDaily ? (data.sma200 || []) : []);
+        syncLegend(interval);
+        applyEntryWindowOrFit(data.candles, interval);
+      })
+      .catch(e => console.error(e))
+      .finally(() => { container.style.opacity = "1"; loading = false; });
+  }
+
+  ivSelect.addEventListener("change", () => {
+    const nextInterval = ivSelect.value;
+    if (nextInterval !== currentInterval) {
+      resetScalesForTimeframeChange();
+      currentInterval = nextInterval;
+    }
+    loadData(nextInterval);
+  });
+
+  // ── log scale toggle ───────────────────────────────────────────
+  let logScale = true;
+  const logBtn = document.getElementById("log_toggle");
+  logBtn.style.background = "#363a45";
+  logBtn.style.color = "#ffffff";
+  logBtn.addEventListener("click", () => {
+    logScale = !logScale;
+    chart.priceScale("right").applyOptions({
+      mode: logScale
+        ? LightweightCharts.PriceScaleMode.Logarithmic
+        : LightweightCharts.PriceScaleMode.Normal,
+    });
+    logBtn.style.background = logScale ? "#363a45" : "#1e222d";
+    logBtn.style.color      = logScale ? "#ffffff" : "#d1d4dc";
+  });
+
+  syncLegend(ivSelect.value);
+  loadData(ivSelect.value);
+})();
+</script>
+{% endblock %}
