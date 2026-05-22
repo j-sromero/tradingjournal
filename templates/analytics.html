@@ -1,6 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>📊 Analytics</h1>
+
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+  <h1 style="margin-bottom:0.5rem;">📊 Analytics</h1>
+  <form method="get" style="display:flex;align-items:center;gap:0.6rem;color:var(--muted);font-size:0.9rem;font-weight:600;margin-bottom:0;">
+    <label for="year-select">Year</label>
+    <select id="year-select" name="year" onchange="this.form.submit()" style="min-width:90px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0.2em 0.7em;font-size:1em;">
+      {% for y in years %}
+        <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
 
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
@@ -10,7 +21,7 @@
     </div>
     <label style="display:flex;align-items:center;gap:0.6rem;color:var(--muted);font-size:0.9rem;font-weight:600;">
       Metric
-      <select id="histogram-metric" style="min-width:150px;">
+      <select id="histogram-metric" style="min-width:150px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0.2em 0.7em;font-size:1em;">
         <option value="pnl">Dollar P&amp;L</option>
         <option value="pnl_pct">Return %</option>
         <option value="r_multiple">R-Multiple</option>

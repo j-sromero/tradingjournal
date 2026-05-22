@@ -1911,7 +1911,21 @@ def api_position_size():
 # ---------- Analytics ----------
 @app.route("/analytics")
 def analytics():
+
+    # Get year filter from query param
+    year = request.args.get("year", None)
     closed_positions = []
+
+    # Query available years for filter
+    years = []
+    if os.path.exists(V3_DB_PATH):
+        conn = sqlite3.connect(V3_DB_PATH)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT substr(entry_datetime, 1, 4) as year FROM trades UNION SELECT DISTINCT substr(exit_datetime, 1, 4) as year FROM trades ORDER BY year DESC;")
+            years = [int(row[0]) for row in cur.fetchall() if row[0]]
+        finally:
+            conn.close()
 
     def _to_iso(dt_text):
         text = (dt_text or "").strip()
@@ -1923,15 +1937,18 @@ def analytics():
         conn = sqlite3.connect(V3_DB_PATH)
         conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(
-                """
+            query = """
                 SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission
                 FROM trades
                 WHERE exit_datetime IS NOT NULL
                   AND exit_price IS NOT NULL
-                ORDER BY entry_datetime ASC, id ASC
-                """
-            ).fetchall()
+            """
+            params = []
+            if year:
+                query += " AND (substr(entry_datetime, 1, 4) = ? OR substr(exit_datetime, 1, 4) = ?)"
+                params = [year, year]
+            query += " ORDER BY entry_datetime ASC, id ASC"
+            rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
 
@@ -2032,7 +2049,9 @@ def analytics():
         by_market=by_market, by_dow=by_dow, by_hour=by_hour, by_plan=by_plan,
         trade_histogram=trade_histogram,
         worst_trades=impact_trades,
-        suggested_sizing_rule=median_size)
+        suggested_sizing_rule=median_size,
+        years=years,
+        year=int(year) if year else (years[0] if years else None))
 
 
 @app.route("/v3")
