@@ -216,6 +216,7 @@ class IBKRTradesHTMLParser(HTMLParser):
 
         if self.in_cell and tag == self.current_cell_tag:
             value = " ".join("".join(self.current_cell_text).split())
+            # Only print debug for ANF symbol rows or header rows
             if self.current_cell_tag == "th":
                 self.current_headers.append(value)
             else:
@@ -226,8 +227,9 @@ class IBKRTradesHTMLParser(HTMLParser):
             return
 
         if self.in_tr and tag == "tr":
-            if self.current_headers == self.EXPECTED_HEADERS:
-                self.headers_matched = True
+            if self.current_headers:
+                if self.current_headers == self.EXPECTED_HEADERS:
+                    self.headers_matched = True
             elif self.headers_matched and len(self.current_row) == len(self.EXPECTED_HEADERS):
                 self.rows.append(self.current_row)
             self.in_tr = False
@@ -289,6 +291,8 @@ def build_trade_rows(rows):
     Build closed rows with FIFO matching.
     For trims, generates separate rows by exit day, keeping same entry datetime/price.
     """
+
+
     by_symbol = defaultdict(list)
     for r in rows:
         by_symbol[r["symbol"]].append(r)
@@ -361,35 +365,11 @@ def build_trade_rows(rows):
             }
             open_rows.append(open_row)
 
-        # Aggregate closures by entry and exit time (YYYYMMDDHHMM)
-        grouped = defaultdict(list)
+        # Instead of aggregating, output each closure as its own row (preserve FIFO fills)
         for c in raw_closures:
-            k = (
-                c["symbol"],
-                c["entry_datetime"],
-                c["entry_price"],
-                c["exit_datetime"][:12],
-            )
-            grouped[k].append(c)
+            closed_rows.append(dict(c))
 
-        for (sym, ent_dt, ent_px, _exit_minute), group in grouped.items():
-            qty_sum = sum(g["quantity"] for g in group)
-            if qty_sum <= 1e-12:
-                continue
-            exit_datetime = max(g["exit_datetime"] for g in group)
-            exit_price = _weighted_avg_price_qty(group, "quantity", "exit_price")
-            commission = r2(sum(g["ib_commission"] for g in group))
 
-            closed_row = {
-                "symbol": sym,
-                "entry_datetime": ent_dt,
-                "exit_datetime": exit_datetime,
-                "entry_price": r2(ent_px),
-                "exit_price": r2(exit_price),
-                "quantity": r2(qty_sum),
-                "ib_commission": commission,
-            }
-            closed_rows.append(closed_row)
 
     closed_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"], r["exit_datetime"] or ""))
     open_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"]))
