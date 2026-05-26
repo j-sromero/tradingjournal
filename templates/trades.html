@@ -1,23 +1,30 @@
 {% extends "base.html" %}
 {% block content %}
+
 <h1>{{ 'Trades v3' if v3_mode else 'Trades' }}</h1>
 <form class="filters" method="get">
   <div class="filters-main">
-  <input type="text" id="search-input" name="q" placeholder="Search ticker, setup, tag…  (press /)" value="{{ q }}">
-  <select name="status">
-    <option value="">All statuses</option>
-    <option value="open" {% if status=='open' %}selected{% endif %}>Open</option>
-    <option value="closed" {% if status=='closed' %}selected{% endif %}>Closed</option>
-  </select>
-  <select name="setup">
-    <option value="">All setups</option>
-    {% for s in setups %}<option value="{{ s }}" {% if setup==s %}selected{% endif %}>{{ s }}</option>{% endfor %}
-  </select>
-  <button class="btn filter-icon-btn" type="submit" aria-label="Apply filters" title="Apply filters">
-    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
-      <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" fill="currentColor"></path>
-    </svg>
-  </button>
+    <input type="text" id="search-input" name="q" placeholder="Search ticker, setup, tag…  (press /)" value="{{ q }}">
+    <select name="status">
+      <option value="">All statuses</option>
+      <option value="open" {% if status=='open' %}selected{% endif %}>Open</option>
+      <option value="closed" {% if status=='closed' %}selected{% endif %}>Closed</option>
+    </select>
+    <select name="setup">
+      <option value="">All setups</option>
+      {% for s in setups %}<option value="{{ s }}" {% if setup==s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="year">
+      <option value="">All years</option>
+      {% for ystr in all_years %}
+        <option value="{{ ystr }}" {% if year==ystr %}selected{% endif %}>{{ ystr }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn filter-icon-btn" type="submit" aria-label="Apply filters" title="Apply filters">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+        <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" fill="currentColor"></path>
+      </svg>
+    </button>
   </div>
   <label class="merge-toggle">
     <input type="checkbox" name="merge_open" value="1" {% if merge_open %}checked{% endif %} onchange="this.form.submit()">

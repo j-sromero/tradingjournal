@@ -94,7 +94,7 @@ app.jinja_env.filters["display_date"] = format_display_date
 # ---------- DB ----------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(V3_DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
@@ -658,24 +658,59 @@ def ibkr_debug():
 
 # ---------- Domain ----------
 def calc_pnl(t):
-    if t["status"] != "closed" or t["exit_price"] is None:
+    # For v3 schema, infer status, direction, fees, stop_loss
+    status = t.get("status")
+    if status is None:
+        # If exit_price is present, treat as closed; else open
+        status = "closed" if t.get("exit_price") is not None else "open"
+    if status != "closed" or t.get("exit_price") is None:
         return (None, None, None)
-    direction = 1 if t["direction"] == "long" else -1
-    gross = (t["exit_price"] - t["entry_price"]) * t["size"] * direction
-    fees = t["fees"] or 0
-    pnl_abs = gross - fees
-    cost = t["entry_price"] * t["size"]
+    # Infer direction: assume long if not present
+    direction = 1
+    if "direction" in t:
+        direction = 1 if t["direction"] == "long" else -1
+    # v3: use quantity as size
+    size = t.get("size")
+    if size is None:
+        size = t.get("quantity", 0)
+    # v3: use ib_commission as fees
+    fees = t.get("fees")
+    if fees is None:
+        fees = t.get("ib_commission", 0)
+    gross = (t["exit_price"] - t["entry_price"]) * size * direction
+    pnl_abs = gross - (fees or 0)
+    cost = t["entry_price"] * size
     pnl_pct = (pnl_abs / cost * 100) if cost else None
     r_multiple = None
-    if t["stop_loss"]:
-        risk_per_unit = abs(t["entry_price"] - t["stop_loss"])
-        risk_total = risk_per_unit * t["size"]
+    stop_loss = t.get("stop_loss")
+    if stop_loss is not None:
+        risk_per_unit = abs(t["entry_price"] - stop_loss)
+        risk_total = risk_per_unit * size
         if risk_total > 0:
             r_multiple = pnl_abs / risk_total
     return (pnl_abs, pnl_pct, r_multiple)
 
 def trade_to_dict(row):
     d = dict(row)
+    # Patch for v3: add missing fields for compatibility
+    if "status" not in d:
+        d["status"] = "closed" if d.get("exit_price") is not None else "open"
+    if "direction" not in d:
+        d["direction"] = "long"  # default to long if unknown
+    if "size" not in d:
+        d["size"] = d.get("quantity", 0)
+    if "fees" not in d:
+        d["fees"] = d.get("ib_commission", 0)
+    if "stop_loss" not in d:
+        d["stop_loss"] = None
+    if "take_profit" not in d:
+        d["take_profit"] = None
+    if "entry_date" not in d:
+        d["entry_date"] = d.get("entry_datetime")
+    if "exit_date" not in d:
+        d["exit_date"] = d.get("exit_datetime")
+    if "followed_plan" not in d:
+        d["followed_plan"] = None
     pnl_abs, pnl_pct, r_mult = calc_pnl(d)
     d["pnl_abs"] = pnl_abs
     d["pnl_pct"] = pnl_pct
@@ -803,7 +838,7 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
 
 def all_trades_dicts():
-    rows = get_db().execute("SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%') ORDER BY entry_date ASC").fetchall()
+    rows = get_db().execute("SELECT * FROM trades ORDER BY entry_datetime ASC").fetchall()
     return [trade_to_dict(r) for r in rows]
 
 def normalize_iso_day(value):
@@ -965,12 +1000,20 @@ def dashboard():
 
     # --- Avg days held (W | L) ---
     def days_held(t):
-        try:
-            d0 = datetime.fromisoformat(t["entry_date"][:19])
-            d1 = datetime.fromisoformat(t["exit_date"][:19]) if t["exit_date"] else d0
+        entry = t.get("entry_date") or t.get("entry_datetime")
+        exit = t.get("exit_date") or t.get("exit_datetime")
+        def parse_yyyymmddhhmm(val):
+            if not val:
+                return None
+            try:
+                return datetime.strptime(val, "%Y%m%d%H%M")
+            except Exception:
+                return None
+        d0 = parse_yyyymmddhhmm(entry)
+        d1 = parse_yyyymmddhhmm(exit) if exit else d0
+        if d0 and d1:
             return (d1 - d0).days
-        except Exception:
-            return None
+        return None
     win_days = [days_held(t) for t in wins if days_held(t) is not None]
     loss_days = [days_held(t) for t in losses if days_held(t) is not None]
     avg_days_win = sum(win_days) / len(win_days) if win_days else 0
@@ -1368,10 +1411,12 @@ def trades_list():
 @app.route("/v3/trades")
 def v3_trades_list():
     v3_init_db(V3_DB_PATH)
+
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "")
     selected_day = normalize_iso_day(request.args.get("day", "").strip())
     merge_open = request.args.get("merge_open") == "1"
+    year = request.args.get("year", "").strip()
 
     conn = sqlite3.connect(V3_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -1392,6 +1437,10 @@ def v3_trades_list():
             day_compact = selected_day.replace("-", "")
             sql += " AND (substr(entry_datetime, 1, 8) = ? OR substr(COALESCE(exit_datetime,''), 1, 8) = ?)"
             params.extend([day_compact, day_compact])
+
+        if year and year.isdigit() and len(year) == 4:
+            sql += " AND (substr(entry_datetime, 1, 4) = ? OR substr(COALESCE(exit_datetime,''), 1, 4) = ?)"
+            params.extend([year, year])
 
         sql += " ORDER BY entry_datetime DESC, id DESC"
         rows = conn.execute(sql, params).fetchall()
@@ -1440,6 +1489,21 @@ def v3_trades_list():
         for item in merged.values():
             item.pop("_entry_notional", None)
         return [merged[key] for key in order]
+
+
+    # Always get all years from all trades for dropdown
+    conn2 = sqlite3.connect(V3_DB_PATH)
+    conn2.row_factory = sqlite3.Row
+    all_years_set = set()
+    try:
+        all_rows = conn2.execute("SELECT entry_datetime, exit_datetime FROM trades").fetchall()
+        for r in all_rows:
+            for dt in [r["entry_datetime"], r["exit_datetime"]]:
+                if dt and len(dt) >= 4 and str(dt)[:4].isdigit():
+                    all_years_set.add(str(dt)[:4])
+    finally:
+        conn2.close()
+    all_years = sorted(all_years_set, reverse=True)
 
     if merge_open:
         rows = _merge_open_trades(rows)
@@ -1498,6 +1562,8 @@ def v3_trades_list():
         merge_open=merge_open,
         stats=stats,
         v3_mode=True,
+        year=year,
+        all_years=all_years,
     )
 
 
@@ -2211,9 +2277,12 @@ def v3_import():
             else:
                 raise ValueError("Choose an import source: HTML upload or Flex query.")
 
+
             closed_rows, open_rows = v3_build_trade_rows(rows)
+            from v3_import_ibkr_trades import merge_open_trades as v3_merge_open_trades
+            open_rows_merged = v3_merge_open_trades(open_rows)
             inserted_closed, skipped_closed = v3_insert_trades(V3_DB_PATH, closed_rows)
-            inserted_open, skipped_open = v3_insert_trades(V3_DB_PATH, open_rows)
+            inserted_open, skipped_open = v3_insert_trades(V3_DB_PATH, open_rows_merged)
 
             inserted = inserted_closed + inserted_open
             skipped = skipped_closed + skipped_open
@@ -2780,10 +2849,41 @@ def import_csv():
                 existing_fingerprints_coarse.add(_trade_fingerprint_coarse(row))
                 existing_fingerprints_fuzzy.add(_trade_fingerprint_fuzzy(row))
 
-            # Detect IBKR Activity Statement HTML format
-            if "<html" in content.lower() or "<table" in content.lower():
-                from html.parser import HTMLParser
 
+            # --- Unified import logic with merging for both HTML and CSV ---
+            import collections
+            def merge_open_trades(trades):
+                """Merge open trades with same symbol and entry_datetime (no exit_datetime)."""
+                merged = {}
+                for t in trades:
+                    if t.get("exit_datetime") or t.get("exit_date"):
+                        # Closed trades, keep as is
+                        key = (t.get("symbol") or t.get("ticker"), t.get("entry_datetime") or t.get("entry_date"), t.get("entry_price"))
+                        merged[key] = dict(t)
+                        continue
+                    key = (t.get("symbol") or t.get("ticker"), t.get("entry_datetime") or t.get("entry_date"))
+                    if key not in merged:
+                        merged[key] = dict(t)
+                    else:
+                        m = merged[key]
+                        # Sum quantities and commissions, weighted avg price
+                        q1 = float(m.get("quantity") or m.get("size") or 0)
+                        q2 = float(t.get("quantity") or t.get("size") or 0)
+                        p1 = float(m.get("entry_price") or 0)
+                        p2 = float(t.get("entry_price") or 0)
+                        c1 = float(m.get("ib_commission") or m.get("fees") or 0)
+                        c2 = float(t.get("ib_commission") or t.get("fees") or 0)
+                        total_q = q1 + q2
+                        m["quantity"] = m["size"] = total_q
+                        m["ib_commission"] = m["fees"] = round(c1 + c2, 6)
+                        m["entry_price"] = round((p1 * q1 + p2 * q2) / total_q, 6) if total_q else p1
+                return list(merged.values())
+
+            # Parse trades from HTML or CSV
+            trades = []
+            if "<html" in content.lower() or "<table" in content.lower():
+                # HTML import
+                from html.parser import HTMLParser
                 class IBKRParser(HTMLParser):
                     def __init__(self):
                         super().__init__()
@@ -2792,11 +2892,9 @@ def import_csv():
                         self.current_row = []
                         self.rows = []
                         self.current_cell = ""
-
                     def handle_starttag(self, tag, attrs):
                         if tag in ("table",): self.in_table = True
                         if tag in ("td", "th"): self.in_cell = True; self.current_cell = ""
-
                     def handle_endtag(self, tag):
                         if tag in ("td", "th"):
                             self.current_row.append(self.current_cell.strip())
@@ -2805,19 +2903,12 @@ def import_csv():
                             if self.current_row:
                                 self.rows.append(self.current_row)
                             self.current_row = []
-
                     def handle_data(self, data):
                         if self.in_cell:
                             self.current_cell += data
-
                 parser = IBKRParser()
                 parser.feed(content)
                 rows = parser.rows
-
-                from collections import deque
-                open_lots = defaultdict(deque)
-                closed_trades_list = []
-
                 for row in rows:
                     if len(row) < 10:
                         continue
@@ -2829,159 +2920,107 @@ def import_csv():
                         qty = float(row[2].replace(',', ''))
                         price = float(row[3].replace(',', ''))
                         comm = abs(float(row[6].replace(',', '')))
-                        code = row[9].strip() if len(row) > 9 else ""
                         dt_parsed = datetime.strptime(dt_str, '%Y-%m-%d, %H:%M:%S')
-                        dt_iso = dt_parsed.strftime('%Y-%m-%dT%H:%M')
+                        dt_iso = dt_parsed.strftime('%Y%m%d%H%M')
                     except (ValueError, AttributeError, IndexError):
                         continue
-
-                    if qty > 0:
-                        open_lots[symbol].append({'datetime': dt_iso, 'qty': qty, 'price': price, 'comm': comm})
-                    elif qty < 0:
-                        qty_to_close = abs(qty)
-                        while qty_to_close > 0 and open_lots[symbol]:
-                            lot = open_lots[symbol][0]
-                            close_qty = min(lot['qty'], qty_to_close)
-                            closed_trades_list.append({
-                                'ticker': symbol,
-                                'entry_date': lot['datetime'],
-                                'exit_date': dt_iso,
-                                'entry_price': lot['price'],
-                                'exit_price': price,
-                                'size': close_qty,
-                                'fees': round(lot['comm'] * (close_qty / lot['qty']) + comm * (close_qty / abs(qty)), 4),
-                            })
-                            if close_qty == lot['qty']:
-                                open_lots[symbol].popleft()
-                            else:
-                                lot['qty'] -= close_qty
-                            qty_to_close -= close_qty
-
-                for t in closed_trades_list:
-                    try:
-                        fp = _trade_fingerprint({
-                            "ticker": t["ticker"],
-                            "direction": "long",
-                            "entry_date": t["entry_date"],
-                            "exit_date": t["exit_date"],
-                            "entry_price": t["entry_price"],
-                            "exit_price": t["exit_price"],
-                            "size": t["size"],
-                            "status": "closed",
-                        })
-                        fp_coarse = _trade_fingerprint_coarse({
-                            "ticker": t["ticker"],
-                            "direction": "long",
-                            "entry_date": t["entry_date"],
-                            "exit_date": t["exit_date"],
-                            "entry_price": t["entry_price"],
-                            "exit_price": t["exit_price"],
-                            "status": "closed",
-                        })
-                        fp_fuzzy = _trade_fingerprint_fuzzy({
-                            "ticker": t["ticker"],
-                            "direction": "long",
-                            "entry_date": t["entry_date"],
-                            "exit_date": t["exit_date"],
-                            "entry_price": t["entry_price"],
-                            "exit_price": t["exit_price"],
-                            "status": "closed",
-                        })
-                        if (
-                            fp in existing_fingerprints
-                            or fp_coarse in existing_fingerprints_coarse
-                            or fp_fuzzy in existing_fingerprints_fuzzy
-                        ):
-                            dedup_count += 1
-                            continue
-                        db.execute("""INSERT INTO trades
-                            (ticker, market, direction, entry_date, exit_date, entry_price,
-                            exit_price, size, fees, setup, tags, status)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (t['ticker'].upper(), 'Stk', 'long',
-                            t['entry_date'], t['exit_date'],
-                            t['entry_price'], t['exit_price'],
-                            t['size'], t['fees'],
-                            'IBKR import', 'ibkr', 'closed'))
-                        count += 1
-                        existing_fingerprints.add(fp)
-                        existing_fingerprints_coarse.add(fp_coarse)
-                        existing_fingerprints_fuzzy.add(fp_fuzzy)
-                    except Exception as e:
-                        flash(f"Skipped a row: {e}", "warning")
-
+                    trades.append({
+                        "symbol": symbol,
+                        "entry_datetime": dt_iso,
+                        "entry_price": price,
+                        "quantity": qty,
+                        "ib_commission": comm,
+                        "exit_datetime": None,
+                    })
             else:
-                # Standard CSV format
+                # CSV import
                 reader = csv.DictReader(io.StringIO(content))
                 for row in reader:
                     try:
                         ticker = row["ticker"].upper().strip()
-                        direction = row["direction"].lower()
                         entry_date = row["entry_date"]
-                        exit_date = row.get("exit_date") or None
                         entry_price = float(row["entry_price"])
+                        size = float(row["size"])
+                        direction = row["direction"].lower()
+                        exit_date = row.get("exit_date") or None
                         exit_price = row.get("exit_price") or None
                         exit_price_f = float(exit_price) if exit_price else None
-                        size = float(row["size"])
                         status = "closed" if exit_price else "open"
-
-                        fp = _trade_fingerprint({
+                        trade = {
                             "ticker": ticker,
-                            "direction": direction,
                             "entry_date": entry_date,
-                            "exit_date": exit_date,
                             "entry_price": entry_price,
-                            "exit_price": exit_price_f,
                             "size": size,
-                            "status": status,
-                        })
-                        fp_coarse = _trade_fingerprint_coarse({
-                            "ticker": ticker,
+                            "fees": float(row.get("fees") or 0),
                             "direction": direction,
-                            "entry_date": entry_date,
                             "exit_date": exit_date,
-                            "entry_price": entry_price,
                             "exit_price": exit_price_f,
                             "status": status,
-                        })
-                        fp_fuzzy = _trade_fingerprint_fuzzy({
-                            "ticker": ticker,
-                            "direction": direction,
-                            "entry_date": entry_date,
-                            "exit_date": exit_date,
-                            "entry_price": entry_price,
-                            "exit_price": exit_price_f,
-                            "status": status,
-                        })
-                        if (
-                            fp in existing_fingerprints
-                            or fp_coarse in existing_fingerprints_coarse
-                            or fp_fuzzy in existing_fingerprints_fuzzy
-                        ):
-                            dedup_count += 1
-                            continue
+                        }
+                        trades.append(trade)
+                    except Exception:
+                        continue
 
-                        db.execute("""INSERT INTO trades
-                            (ticker, market, direction, entry_date, exit_date, entry_price,
-                             exit_price, size, stop_loss, take_profit, fees, setup, tags, status)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ticker, row.get("market"),
-                             direction, entry_date,
-                             exit_date,
-                             entry_price,
-                             exit_price_f,
-                             size,
-                             float(row["stop_loss"]) if row.get("stop_loss") else None,
-                             float(row["take_profit"]) if row.get("take_profit") else None,
-                             float(row.get("fees") or 0),
-                             row.get("setup"), row.get("tags"),
-                             status))
-                        count += 1
-                        existing_fingerprints.add(fp)
-                        existing_fingerprints_coarse.add(fp_coarse)
-                        existing_fingerprints_fuzzy.add(fp_fuzzy)
-                    except (KeyError, ValueError) as e:
-                        flash(f"Skipped a row: {e}", "warning")
+            # Merge open trades
+            merged_trades = merge_open_trades(trades)
+            for t in merged_trades:
+                try:
+                    ticker = t.get("symbol") or t.get("ticker")
+                    entry_date = t.get("entry_datetime") or t.get("entry_date")
+                    entry_price = float(t.get("entry_price") or 0)
+                    size = float(t.get("quantity") or t.get("size") or 0)
+                    fees = float(t.get("ib_commission") or t.get("fees") or 0)
+                    exit_date = t.get("exit_datetime") or t.get("exit_date")
+                    exit_price = t.get("exit_price")
+                    direction = t.get("direction", "long")
+                    status = t.get("status", "open" if not exit_date else "closed")
+                    # Deduplication logic
+                    fp = _trade_fingerprint({
+                        "ticker": ticker,
+                        "direction": direction,
+                        "entry_date": entry_date,
+                        "exit_date": exit_date,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "size": size,
+                        "status": status,
+                    })
+                    fp_coarse = _trade_fingerprint_coarse({
+                        "ticker": ticker,
+                        "direction": direction,
+                        "entry_date": entry_date,
+                        "exit_date": exit_date,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "status": status,
+                    })
+                    fp_fuzzy = _trade_fingerprint_fuzzy({
+                        "ticker": ticker,
+                        "direction": direction,
+                        "entry_date": entry_date,
+                        "exit_date": exit_date,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "status": status,
+                    })
+                    if (
+                        fp in existing_fingerprints
+                        or fp_coarse in existing_fingerprints_coarse
+                        or fp_fuzzy in existing_fingerprints_fuzzy
+                    ):
+                        dedup_count += 1
+                        continue
+                    db.execute("""INSERT INTO trades
+                        (ticker, market, direction, entry_date, exit_date, entry_price,
+                         exit_price, size, fees, setup, tags, status)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (ticker, 'Stk', direction, entry_date, exit_date, entry_price, exit_price, size, fees, 'import', 'import', status))
+                    count += 1
+                    existing_fingerprints.add(fp)
+                    existing_fingerprints_coarse.add(fp_coarse)
+                    existing_fingerprints_fuzzy.add(fp_fuzzy)
+                except Exception as e:
+                    flash(f"Skipped a row: {e}", "warning")
 
             db.commit()
             flash(f"Imported {count} trades ✅", "success")

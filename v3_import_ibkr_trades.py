@@ -17,7 +17,6 @@ from datetime import datetime
 from html.parser import HTMLParser
 from ibkr import fetch_flex_report
 
-
 def r2(value: float) -> float:
     return round(float(value), 2)
 
@@ -330,17 +329,16 @@ def build_trade_rows(rows):
                     entry_comm_alloc = lot["comm_remaining"] * (match_qty / lot["qty"])
                 exit_comm_alloc = close_comm_total * (match_qty / abs(qty)) if abs(qty) > 0 else 0.0
 
-                raw_closures.append(
-                    {
-                        "symbol": symbol,
-                        "entry_datetime": lot["entry_datetime"],
-                        "entry_price": r2(lot["entry_price"]),
-                        "exit_datetime": f["datetime"],
-                        "exit_price": r2(f["trade_price"]),
-                        "quantity": r2(match_qty),
-                        "ib_commission": r2(entry_comm_alloc + exit_comm_alloc),
-                    }
-                )
+                closure = {
+                    "symbol": symbol,
+                    "entry_datetime": lot["entry_datetime"],
+                    "entry_price": r2(lot["entry_price"]),
+                    "exit_datetime": f["datetime"],
+                    "exit_price": r2(f["trade_price"]),
+                    "quantity": r2(match_qty),
+                    "ib_commission": r2(entry_comm_alloc + exit_comm_alloc),
+                }
+                raw_closures.append(closure)
 
                 lot["qty"] -= match_qty
                 lot["comm_remaining"] -= entry_comm_alloc
@@ -348,20 +346,20 @@ def build_trade_rows(rows):
                 if lot["qty"] <= 1e-12:
                     open_lots.popleft()
 
+
         for lot in open_lots:
             if lot["qty"] <= 1e-12:
                 continue
-            open_rows.append(
-                {
-                    "symbol": symbol,
-                    "entry_datetime": lot["entry_datetime"],
-                    "exit_datetime": None,
-                    "entry_price": r2(lot["entry_price"]),
-                    "exit_price": None,
-                    "quantity": r2(lot["qty"]),
-                    "ib_commission": r2(max(0.0, lot["comm_remaining"])),
-                }
-            )
+            open_row = {
+                "symbol": symbol,
+                "entry_datetime": lot["entry_datetime"],
+                "exit_datetime": None,
+                "entry_price": r2(lot["entry_price"]),
+                "exit_price": None,
+                "quantity": r2(lot["qty"]),
+                "ib_commission": r2(max(0.0, lot["comm_remaining"])),
+            }
+            open_rows.append(open_row)
 
         # Aggregate closures by entry and exit time (YYYYMMDDHHMM)
         grouped = defaultdict(list)
@@ -382,17 +380,16 @@ def build_trade_rows(rows):
             exit_price = _weighted_avg_price_qty(group, "quantity", "exit_price")
             commission = r2(sum(g["ib_commission"] for g in group))
 
-            closed_rows.append(
-                {
-                    "symbol": sym,
-                    "entry_datetime": ent_dt,
-                    "exit_datetime": exit_datetime,
-                    "entry_price": r2(ent_px),
-                    "exit_price": r2(exit_price),
-                    "quantity": r2(qty_sum),
-                    "ib_commission": commission,
-                }
-            )
+            closed_row = {
+                "symbol": sym,
+                "entry_datetime": ent_dt,
+                "exit_datetime": exit_datetime,
+                "entry_price": r2(ent_px),
+                "exit_price": r2(exit_price),
+                "quantity": r2(qty_sum),
+                "ib_commission": commission,
+            }
+            closed_rows.append(closed_row)
 
     closed_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"], r["exit_datetime"] or ""))
     open_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"]))
@@ -460,6 +457,28 @@ def insert_trades(db_path: str, rows):
     skipped = max(0, len(rows) - inserted)
     return inserted, skipped
 
+# --- Merge open trades with same symbol and entry_datetime ---
+def merge_open_trades(open_rows):
+    merged = {}
+    for t in open_rows:
+        key = (t["symbol"], t["entry_datetime"])
+        if key not in merged:
+            merged[key] = dict(t)
+        else:
+            m = merged[key]
+            q1 = float(m.get("quantity") or 0)
+            q2 = float(t.get("quantity") or 0)
+            p1 = float(m.get("entry_price") or 0)
+            p2 = float(t.get("entry_price") or 0)
+            c1 = float(m.get("ib_commission") or 0)
+            c2 = float(t.get("ib_commission") or 0)
+            total_q = q1 + q2
+            m["quantity"] = total_q
+            m["ib_commission"] = round(c1 + c2, 6)
+            m["entry_price"] = round((p1 * q1 + p2 * q2) / total_q, 6) if total_q else p1
+    return list(merged.values())
+
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import IBKR trades into journal_v3.db")
@@ -479,22 +498,30 @@ def main() -> None:
         if not token or not query_id:
             raise SystemExit("Missing token/query-id. Use --token/--query-id, env vars, or --html-file")
         xml = fetch_flex_report(token, query_id)
-        rows = parse_trades_xml(xml)
-    closed_rows, open_rows = build_trade_rows(rows)
+        rows = parse_trades_xml(xml)    
+
+    try:
+        closed_rows, open_rows = build_trade_rows(rows)
+    except Exception as e:
+        print("Exception in build_trade_rows:", e, flush=True)
+        import traceback; traceback.print_exc()
+        raise
+    
+    open_rows_merged = merge_open_trades(open_rows)
     inserted_closed, skipped_closed = insert_trades(args.db, closed_rows)
-    inserted_open, skipped_open = insert_trades(args.db, open_rows)
+    inserted_open, skipped_open = insert_trades(args.db, open_rows_merged)
 
     inserted = inserted_closed + inserted_open
     skipped = skipped_closed + skipped_open
 
-    print(f"✅ Inserted {inserted} rows into {args.db}")
+    print(f"✅ Inserted {inserted} rows into {args.db}", flush=True)
     if skipped:
-        print(f"⚠️ Skipped {skipped} duplicate row(s)")
-    print(f"Parsed Trade fills: {len(rows)}")
+        print(f"⚠️ Skipped {skipped} duplicate row(s)", flush=True)
+    print(f"Parsed Trade fills: {len(rows)}", flush=True)
     if inserted_closed:
-        print(f"Closed rows inserted: {inserted_closed}")
+        print(f"Closed rows inserted: {inserted_closed}", flush=True)
     if inserted_open:
-        print(f"Open rows inserted: {inserted_open}")
+        print(f"Open rows inserted: {inserted_open}", flush=True)
 
 
 if __name__ == "__main__":
