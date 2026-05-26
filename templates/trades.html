@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 
-<h1>{{ 'Trades v3' if v3_mode else 'Trades' }}</h1>
+<h1>{{ 'Trades'}}</h1>
 <form class="filters" method="get">
   <div class="filters-main">
     <input type="text" id="search-input" name="q" placeholder="Search ticker, setup, tag…  (press /)" value="{{ q }}">
@@ -26,11 +26,19 @@
       </svg>
     </button>
   </div>
-  <label class="merge-toggle">
-    <input type="checkbox" name="merge_open" value="1" {% if merge_open %}checked{% endif %} onchange="this.form.submit()">
-    <span class="merge-toggle__switch" aria-hidden="true"></span>
-    <span class="merge-toggle__text">Merge add-ons on open trades</span>
-  </label>
+  {% if raw_group_active %}
+    {% if v3_mode %}
+      <a class="btn" href="{{ url_for('v3_trades_list', q=q, status=status, setup=setup, day=selected_day, merge_open=merge_open) }}#row-{{ raw_group_anchor }}">Back to grouped view</a>
+    {% else %}
+      <a class="btn" href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, merge_open=merge_open) }}#row-{{ raw_group_anchor }}">Back to grouped view</a>
+    {% endif %}
+  {% else %}
+    <label class="merge-toggle">
+      <input type="checkbox" name="merge_open" value="1" {% if merge_open %}checked{% endif %} onchange="this.form.submit()">
+      <span class="merge-toggle__switch" aria-hidden="true"></span>
+      <span class="merge-toggle__text">Merge add-ons on open trades</span>
+    </label>
+  {% endif %}
   {% if selected_day %}<input type="hidden" name="day" value="{{ selected_day }}">{% endif %}
   {% if show_individual %}<input type="hidden" name="raw" value="1">{% endif %}
   {% if selected_campaign %}<input type="hidden" name="campaign" value="{{ selected_campaign }}">{% endif %}
@@ -42,15 +50,6 @@
     <span class="muted">Showing trades where you opened or closed a position on that date.</span>
     <a class="btn" href="{{ url_for('v3_trades_list', q=q, status=status, merge_open=merge_open) if v3_mode else url_for('trades_list', q=q, status=status, setup=setup, merge_open=merge_open) }}">Clear day filter</a>
   </div>
-{% endif %}
-
-{% if raw_group_active %}
-  <div class="card filter-summary">
-    <strong>Position breakdown:</strong> {{ raw_group_label }}
-    <span class="muted">Each row below is one sell leg from this closed position.</span>
-    
-    <a class="btn" href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, merge_open=merge_open) }}#row-{{ raw_group_anchor }}">Back to grouped view</a>
-</div>
 {% endif %}
 
 <div class="card">
@@ -109,7 +108,13 @@
       <td>{{ t.exit_date|display_date if t.exit_date else '—' }}</td>
       <td>
         <strong>{{ t.ticker }}</strong>
-        {% if t.is_grouped %}<div class="muted">{{ t.group_count }} fills grouped</div>{% endif %}
+        {% if t.is_grouped and v3_mode %}
+          <div class="muted">{{ t.group_count }} fills grouped</div>
+        {% elif t.is_grouped %}
+          <div class="muted">
+            <a href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, raw=1, campaign=t.campaign_id, merge_open=merge_open) }}" style="text-decoration:underline; cursor:pointer;">{{ t.group_count }} fills grouped</a>
+          </div>
+        {% endif %}
       </td>
       <td><span class="badge {{ t.direction }}">{{ t.direction }}</span></td>
       <td>{{ t.entry_price }}</td>
@@ -123,7 +128,9 @@
       <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
       <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
       <td>
-        {% if v3_mode %}
+        {% if v3_mode and t.is_grouped %}
+          <a href="{{ url_for('v3_trades_list', q=q, status=status, setup=setup, day=selected_day, raw=1, campaign=t.campaign_id, merge_open=merge_open) }}">trims</a>
+        {% elif v3_mode %}
           <a href="{{ url_for('v3_chart_view', trade_id=t.id, symbol=t.ticker, entry=t.entry_date, exit=t.exit_date or '', entry_price=t.entry_price, exit_price=t.exit_price if t.exit_price is not none else '') }}">chart</a>
         {% elif t.is_grouped %}
           <a href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, raw=1, campaign=t.campaign_id, merge_open=merge_open) }}">fills</a>

@@ -740,11 +740,8 @@ def parse_trade_datetime(value):
 
 def trade_campaign_bucket_key(trade):
     return (
-        trade.get("ticker") or "",
-        trade.get("market") or "",
-        trade.get("direction") or "",
-        trade.get("status") or "",
-        trade.get("setup") or "",
+        trade.get("symbol") or trade.get("ticker") or "",
+        trade.get("entry_datetime") or trade.get("entry_date") or "",
     )
 
 def build_trade_campaigns(trades):
@@ -779,14 +776,11 @@ def build_trade_campaigns(trades):
                 bucket_campaigns.append({"bucket_key": bucket_key, "start": start, "end": end, "trades": [trade]})
 
         for idx, camp in enumerate(bucket_campaigns, start=1):
-            ticker, market, direction, status, setup = bucket_key
+            symbol, entry_datetime = bucket_key
             campaigns.append({
                 "campaign_id": "|".join([
-                    ticker,
-                    market,
-                    direction,
-                    status,
-                    setup,
+                    str(symbol),
+                    str(entry_datetime),
                     camp["start"].isoformat(),
                     camp["end"].isoformat(),
                     str(idx),
@@ -1508,7 +1502,8 @@ def v3_trades_list():
     if merge_open:
         rows = _merge_open_trades(rows)
 
-    trades = []
+    # Group v3 trades by symbol and entry_datetime
+    trade_rows = []
     for r in rows:
         entry_iso = _to_iso(r["entry_datetime"])
         exit_iso = _to_iso(r["exit_datetime"])
@@ -1524,10 +1519,11 @@ def v3_trades_list():
             cost = entry_price * size
             pnl_pct = (pnl_abs / cost * 100) if cost else None
 
-        trades.append(
+        trade_rows.append(
             {
                 "id": int(r["id"]),
-                "ticker": r["symbol"],
+                "symbol": r["symbol"],
+                "entry_datetime": r["entry_datetime"],
                 "direction": "long",
                 "entry_date": entry_iso,
                 "exit_date": exit_iso,
@@ -1539,32 +1535,106 @@ def v3_trades_list():
                 "pnl_abs": None if pnl_abs is None else round(pnl_abs, 2),
                 "pnl_pct": None if pnl_pct is None else round(pnl_pct, 2),
                 "r_multiple": None,
-                "is_grouped": False,
+                "fees": fees,
             }
         )
 
+    # Group by (symbol, entry_datetime)
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for t in trade_rows:
+        grouped[(t["symbol"], t["entry_datetime"])] .append(t)
+
+    trades = []
+    campaign_map = {}
+    for group in grouped.values():
+        if len(group) == 1:
+            t = dict(group[0])
+            t["is_grouped"] = False
+            t["group_count"] = 1
+            t["ticker"] = t.get("symbol")
+            trades.append(t)
+        else:
+            first = group[0]
+            total_size = sum(tr["size"] for tr in group)
+            entry_notional = sum(tr["entry_price"] * tr["size"] for tr in group)
+            exit_size = sum(tr["size"] for tr in group if tr["exit_price"] is not None)
+            exit_notional = sum((tr["exit_price"] or 0) * tr["size"] for tr in group if tr["exit_price"] is not None)
+            fees = sum(tr["fees"] for tr in group)
+            entry_date = min(tr["entry_date"] for tr in group if tr["entry_date"])
+            exit_date = max(tr["exit_date"] for tr in group if tr["exit_date"])
+            t = dict(first)
+            t["size"] = total_size
+            t["fees"] = fees
+            t["entry_price"] = round(entry_notional / total_size, 4) if total_size else first["entry_price"]
+            t["exit_price"] = round(exit_notional / exit_size, 4) if exit_size else None
+            t["entry_date"] = entry_date
+            t["exit_date"] = exit_date
+            t["is_grouped"] = True
+            t["group_count"] = len(group)
+            t["group_ids"] = [tr["id"] for tr in group]
+            t["ticker"] = t.get("symbol")
+            t["campaign_id"] = f"{t['symbol']}|{t['entry_datetime']}"
+            campaign_map[t["campaign_id"]] = {"trades": group}
+            trades.append(t)
+
+    # Support raw (fills) view for grouped trades
+    show_individual = request.args.get("raw") == "1"
+    selected_campaign = request.args.get("campaign", "")
+    raw_group_active = show_individual and selected_campaign in campaign_map
+    raw_group_label = None
+    raw_group_anchor = None
+    if raw_group_active:
+        selected_camp = campaign_map[selected_campaign]
+        selected_members = sorted(
+            selected_camp["trades"],
+            key=lambda t: (
+                t.get("exit_date") or t.get("entry_date") or "",
+                t.get("entry_date") or "",
+                t.get("id") or 0,
+            ),
+        )
+        trades = []
+        for t in selected_members:
+            t = dict(t)
+            trades.append(t)
+        raw_group_label = f"{selected_members[0].get('ticker', selected_members[0].get('symbol', ''))} · {selected_members[0]['entry_date']}"
+        raw_group_anchor = selected_members[0]["id"]
+
     selected_day_label = format_display_date(selected_day) if selected_day else None
     stats = {"execution": {"optimal_size": 0}}
-    return render_template(
-        "trades.html",
-        trades=trades,
-        q=q,
-        status=status,
-        setup="",
-        setups=[],
-        selected_day=selected_day,
-        selected_day_label=selected_day_label,
-        show_individual=False,
-        raw_group_active=False,
-        raw_group_label=None,
-        raw_group_anchor=None,
-        selected_campaign="",
-        merge_open=merge_open,
-        stats=stats,
-        v3_mode=True,
-        year=year,
-        all_years=all_years,
-    )
+    if raw_group_active:
+        return render_template(
+            "v3_fills.html",
+            trades=trades,
+            q=q,
+            status=status,
+            selected_day=selected_day,
+            raw_group_label=raw_group_label,
+            raw_group_anchor=raw_group_anchor,
+            merge_open=merge_open,
+        )
+    else:
+        return render_template(
+            "trades.html",
+            trades=trades,
+            q=q,
+            status=status,
+            setup="",
+            setups=[],
+            selected_day=selected_day,
+            selected_day_label=selected_day_label,
+            show_individual=show_individual,
+            raw_group_active=raw_group_active,
+            raw_group_label=raw_group_label,
+            raw_group_anchor=raw_group_anchor,
+            selected_campaign=selected_campaign,
+            merge_open=merge_open,
+            stats=stats,
+            v3_mode=True,
+            year=year,
+            all_years=all_years,
+        )
 
 
 @app.route("/v3/chart")

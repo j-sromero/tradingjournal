@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>v3 Trade Fills</h1>
+<div class="card filter-summary">
+  <strong>Position breakdown:</strong> {{ raw_group_label }}
+  <span class="muted">Each row below is one exit (fill) from this grouped position.</span>
+  <a class="btn" href="{{ url_for('v3_trades_list', q=q, status=status, setup=setup, day=selected_day, merge_open=merge_open) }}#row-{{ raw_group_anchor }}">Back to grouped view</a>
+</div>
+<div class="card">
+<table>
+  <thead>
+    <tr>
+      <th>Entry Date</th>
+      <th>Exit Date</th>
+      <th>Ticker</th>
+      <th>Dir</th>
+      <th>Entry</th>
+      <th>Exit</th>
+      <th>Size</th>
+      <th>Pos. Value</th>
+      <th>P&amp;L</th>
+      <th>%</th>
+      <th>R</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in trades %}
+    {% set pos_value = (t.size * t.entry_price) if t.size and t.entry_price else None %}
+    <tr id="row-{{ t.id }}">
+      <td>{{ t.entry_date|display_date }}</td>
+      <td>{{ t.exit_date|display_date if t.exit_date else '—' }}</td>
+      <td><strong>{{ t.ticker or t.symbol }}</strong></td>
+      <td><span class="badge {{ t.direction }}">{{ t.direction }}</span></td>
+      <td>{{ t.entry_price }}</td>
+      <td>{{ t.exit_price if t.exit_price is not none else '—' }}</td>
+      <td>{{ t.size }}</td>
+      <td>{% if pos_value is not none %}${{ '%.2f' % pos_value }}{% else %}—{% endif %}</td>
+      <td class="{{ 'pos' if t.pnl_abs and t.pnl_abs >= 0 else ('neg' if t.pnl_abs else '') }}">
+        {{ '$' ~ ('%.2f' % t.pnl_abs) if t.pnl_abs is not none else '—' }}
+      </td>
+      <td>{{ ('%.2f%%' % t.pnl_pct) if t.pnl_pct is not none else '—' }}</td>
+      <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
+      <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
+      <td>
+        <a href="{{ url_for('v3_chart_view', trade_id=t.id, symbol=t.ticker or t.symbol, entry=t.entry_date, exit=t.exit_date or '', entry_price=t.entry_price, exit_price=t.exit_price if t.exit_price is not none else '') }}">chart</a>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="13" style="text-align:center;padding:2rem;">No fills found for this grouped position.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
