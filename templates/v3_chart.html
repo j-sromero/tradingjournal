@@ -18,8 +18,12 @@
   </div>
 </div>
 
-<div class="card" style="padding:0; overflow:hidden;">
+<div class="card" style="padding:0; overflow:hidden; position:relative;">
   <div id="lw_chart" style="height:720px; width:100%;"></div>
+  <div id="chart_error" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(20,22,34,0.96); color:#f87171; z-index:10; align-items:center; justify-content:center; flex-direction:column; font-size:1.2rem; text-align:center;">
+    <div id="chart_error_msg"></div>
+    <button id="chart_error_btn" style="margin-top:1.5rem; padding:.5rem 1.5rem; border-radius:6px; background:#2563eb; color:#fff; border:none; font-size:1rem; cursor:pointer; display:none;"></button>
+  </div>
 </div>
 {% endblock %}
 
@@ -342,15 +346,58 @@
     });
   }
 
+
+  const chartError = document.getElementById("chart_error");
+  const chartErrorMsg = document.getElementById("chart_error_msg");
+  const chartErrorBtn = document.getElementById("chart_error_btn");
+
+  const intervalOrder = ["5m", "15m", "1h", "1d"];
+  function getNextHigherInterval(current) {
+    const idx = intervalOrder.indexOf(current);
+    if (idx >= 0 && idx < intervalOrder.length - 1) return intervalOrder[idx + 1];
+    return null;
+  }
+
+  function showChartError(msg, nextInterval) {
+    chartErrorMsg.textContent = msg;
+    chartError.style.display = "flex";
+    chartErrorBtn.style.display = nextInterval ? "inline-block" : "none";
+    if (nextInterval) {
+      chartErrorBtn.textContent = `Go to higher timeframe (${nextInterval})`;
+      chartErrorBtn.onclick = () => {
+        ivSelect.value = nextInterval;
+        chartError.style.display = "none";
+        loadData(nextInterval);
+      };
+    }
+  }
+
+  function hideChartError() {
+    chartError.style.display = "none";
+  }
+
   function loadData(interval) {
     if (loading) return;
     loading = true;
     container.style.opacity = "0.4";
 
-    fetch(`/api/v3/ohlcv?symbol=${encodeURIComponent(SYMBOL)}&interval=${interval}`)
+    hideChartError();
+
+    const params = new URLSearchParams({
+      symbol: SYMBOL,
+      interval: interval,
+      entry: ENTRY_HINT,
+      exit: EXIT_HINT
+    });
+    fetch(`/api/v3/ohlcv?${params.toString()}`)
       .then(r => r.json())
       .then(data => {
-        if (data.error) { alert("Error: " + data.error); return; }
+        if (data.error) {
+          // Try to suggest next higher timeframe if available
+          const nextIv = getNextHigherInterval(interval);
+          showChartError(data.error, nextIv);
+          return;
+        }
         candleSeries.setData(data.candles);
         candleSeries.setMarkers(buildTradeMarkers(data.candles, interval));
         volumeSeries.setData(data.volume);

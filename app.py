@@ -1767,11 +1767,15 @@ def api_v3_ohlcv():
     """Return OHLCV + EMA10/21 for a symbol via yfinance."""
     symbol   = (request.args.get("symbol", "AAPL") or "AAPL").strip().upper()
     interval = request.args.get("interval", "1h")
+    entry_str = request.args.get("entry")
+    exit_str = request.args.get("exit")
+    from datetime import datetime
+    import pytz
 
     # Clamp to intervals yfinance actually supports
     valid_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "1wk", "1mo"}
     if interval not in valid_intervals:
-        interval = "1h"
+        return jsonify({"error": f"Interval '{interval}' is not supported by yfinance. Supported intervals: {', '.join(sorted(valid_intervals))}."}), 400
 
     # Pick fetch period based on interval limits
     period_map = {
@@ -1788,6 +1792,58 @@ def api_v3_ohlcv():
                          progress=False, auto_adjust=True)
         if df.empty:
             return jsonify({"error": "no data"}), 404
+
+        # Check if entry/exit are provided and if data covers the range
+        if entry_str:
+            try:
+                # Accept both 'YYYY-MM-DD HH:MM' and 'YYYY-MM-DDTHH:MM' and 'YYYY-MM-DD'
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+                    try:
+                        entry_dt = datetime.strptime(entry_str[:16], fmt)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    entry_dt = None
+            except Exception:
+                entry_dt = None
+        else:
+            entry_dt = None
+        if exit_str:
+            try:
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+                    try:
+                        exit_dt = datetime.strptime(exit_str[:16], fmt)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    exit_dt = None
+            except Exception:
+                exit_dt = None
+        else:
+            exit_dt = None
+
+        # If index is not tz-aware, localize to UTC then convert to ET
+        idx = df.index
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+        idx = idx.tz_convert(et_tz)
+        df.index = idx
+
+        # Only check if entry_dt is provided
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+        first_bar = df.index[0]
+        last_bar = df.index[-1]
+        if entry_dt:
+            entry_dt_et = entry_dt.replace(tzinfo=et)
+            if entry_dt_et < first_bar:
+                return jsonify({"error": f"Requested entry date {entry_dt_et.strftime('%Y-%m-%d %H:%M')} is before first available OHLCV data ({first_bar.strftime('%Y-%m-%d %H:%M')}). Try a higher timeframe or a more recent entry date."}), 422
+        if exit_dt:
+            exit_dt_et = exit_dt.replace(tzinfo=et)
+            if exit_dt_et > last_bar:
+                return jsonify({"error": f"Requested exit date {exit_dt_et.strftime('%Y-%m-%d %H:%M')} is after last available OHLCV data ({last_bar.strftime('%Y-%m-%d %H:%M')}). Try a higher timeframe or a more recent exit date."}), 422
 
         # Flatten MultiIndex columns if present
         if isinstance(df.columns, type(df.columns)) and hasattr(df.columns, "levels"):
