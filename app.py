@@ -71,6 +71,14 @@ def configure_logging(flask_app):
 
 configure_logging(app)
 
+def parse_yyyymmddhhmm(val):
+    if not val or len(val) < 12:
+        return None
+    try:
+        return datetime.strptime(val, "%Y%m%d%H%M")
+    except Exception:
+        return None
+
 def format_display_date(value):
     if not value:
         return "—"
@@ -987,13 +995,7 @@ def dashboard():
     def days_held(t):
         entry = t.get("entry_date") or t.get("entry_datetime")
         exit = t.get("exit_date") or t.get("exit_datetime")
-        def parse_yyyymmddhhmm(val):
-            if not val:
-                return None
-            try:
-                return datetime.strptime(val, "%Y%m%d%H%M")
-            except Exception:
-                return None
+      
         d0 = parse_yyyymmddhhmm(entry)
         d1 = parse_yyyymmddhhmm(exit) if exit else d0
         if d0 and d1:
@@ -1115,12 +1117,14 @@ def dashboard():
 
     # Monthly progress
     month_prefix = date.today().strftime("%Y-%m")
-    month_trade_pnl = sum(t["pnl_abs"] for t in closed_raw if (t["exit_date"] or t["entry_date"])[:7] == month_prefix)
-    month_pnl = month_trade_pnl + cash_interest_this_month
-    month_progress = min(100, (month_pnl / monthly_goal * 100)) if monthly_goal else 0
-    
-    # Monthly stats (use campaigns, not raw fills, so multi-fill orders count as 1 trade)
-    month_trades = [t for t in closed_positions if (t["exit_date"] or t["entry_date"])[:7] == month_prefix]
+    month_trades = [
+        t for t in closed_positions
+        if (
+            (dt := parse_yyyymmddhhmm(t.get("exit_date") or t.get("entry_date")))
+            and dt.strftime("%Y-%m") == month_prefix
+        )
+    ]
+
     month_wins = [t for t in month_trades if t["pnl_abs"] > 0]
     month_losses = [t for t in month_trades if t["pnl_abs"] < 0]
     month_avg_win = (sum(t["pnl_abs"] for t in month_wins) / len(month_wins)) if month_wins else 0
@@ -1132,6 +1136,11 @@ def dashboard():
     month_gross_losses = abs(sum(t["pnl_abs"] for t in month_losses))
     month_profit_factor = round(month_gross_wins / month_gross_losses, 2) if month_gross_losses else None
 
+    month_trade_pnl = sum(t["pnl_abs"] for t in month_trades)
+    print(f"DEBUG: month_trade_pnl={month_trade_pnl}, cash_interest_this_month={cash_interest_this_month}")
+    month_pnl = month_trade_pnl + cash_interest_this_month
+    month_progress = min(100, (month_pnl / monthly_goal * 100)) if monthly_goal else 0
+    print(f"DEBUG: month_trades={len(month_trades)}, month_wins={len(month_wins)}, month_losses={len(month_losses)}, month_avg_win={month_avg_win}, month_avg_loss={month_avg_loss}, month_win_rate={month_win_rate}, month_profit_factor={month_profit_factor}")
     s = streaks(closed_raw)
 
     # Calculate current average R per winning trade
