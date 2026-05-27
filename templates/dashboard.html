@@ -172,10 +172,25 @@
   const daily = {{ daily|tojson }};
   const heatmap = document.getElementById('heatmap');
   const today = new Date();
+  // Helper to find a matching key in daily for a given date (YYYY-MM-DD)
+  function findDailyKey(dateStr) {
+    // Try exact match first
+    if (daily[dateStr] !== undefined) return dateStr;
+    // Try to find a key like YYYYMMDD or YYYYMMDDHH...
+    const compact = dateStr.replace(/-/g, '');
+    // Try YYYYMMDD
+    if (daily[compact] !== undefined) return compact;
+    // Try keys that start with YYYYMMDD
+    for (const k in daily) {
+      if (k.startsWith(compact)) return k;
+    }
+    return null;
+  }
   for (let i = 89; i >= 0; i--) {
     const d = new Date(today); d.setDate(today.getDate() - i);
     const key = d.toISOString().slice(0,10);
-    const pnl = daily[key];
+    const matchKey = findDailyKey(key);
+    const pnl = matchKey ? daily[matchKey] : undefined;
     const cell = document.createElement('div');
     cell.className = 'cell';
     cell.title = key + (pnl !== undefined ? ` — $${pnl.toFixed(2)}` : ' — no trades');
