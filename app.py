@@ -1563,6 +1563,12 @@ def v3_trades_list():
             fees = sum(tr["fees"] for tr in group)
             entry_date = min(tr["entry_date"] for tr in group if tr["entry_date"])
             exit_date = max(tr["exit_date"] for tr in group if tr["exit_date"])
+            total_pnl = sum(
+                ((tr["exit_price"] or 0) - (tr["entry_price"] or 0)) * (tr["size"] or 0) - (tr.get("fees") or 0)
+                for tr in group if tr["exit_price"] is not None
+            )
+            total_entry_notional = sum(abs((tr["entry_price"] or 0) * (tr["size"] or 0)) for tr in group)
+            grouped_pct = (total_pnl / total_entry_notional * 100) if total_entry_notional else None
             t = dict(first)
             t["size"] = total_size
             t["fees"] = fees
@@ -1575,6 +1581,8 @@ def v3_trades_list():
             t["group_ids"] = [tr["id"] for tr in group]
             t["ticker"] = t.get("symbol")
             t["campaign_id"] = f"{t['symbol']}|{t['entry_datetime']}"
+            t["pnl_abs"] = round(total_pnl, 2) if total_pnl is not None else None
+            t["pnl_pct"] = round(grouped_pct, 2) if grouped_pct is not None else None
             campaign_map[t["campaign_id"]] = {"trades": group}
             trades.append(t)
 
