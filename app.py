@@ -759,38 +759,22 @@ def build_trade_campaigns(trades):
                 t.get("id") or 0,
             ),
         )
-        bucket_campaigns = []
-        for trade in ordered:
-            start = parse_trade_datetime(trade.get("entry_date")) or datetime.min
-            end = parse_trade_datetime(trade.get("exit_date") or trade.get("entry_date")) or start
-            is_open_bucket = (trade.get("status") or "").lower() == "open"
-            # Merge only when holding windows truly overlap.
-            # If the previous campaign is already fully closed at the same timestamp,
-            # start a new campaign (flat -> reopened position).
-            if bucket_campaigns and (is_open_bucket or start < bucket_campaigns[-1]["end"]):
-                camp = bucket_campaigns[-1]
-                camp["trades"].append(trade)
-                if end > camp["end"]:
-                    camp["end"] = end
-            else:
-                bucket_campaigns.append({"bucket_key": bucket_key, "start": start, "end": end, "trades": [trade]})
-
-        for idx, camp in enumerate(bucket_campaigns, start=1):
-            symbol, entry_datetime = bucket_key
-            campaigns.append({
-                "campaign_id": "|".join([
-                    str(symbol),
-                    str(entry_datetime),
-                    camp["start"].isoformat(),
-                    camp["end"].isoformat(),
-                    str(idx),
-                ]),
-                "bucket_key": bucket_key,
-                "start": camp["start"],
-                "end": camp["end"],
-                "trades": camp["trades"],
-            })
-
+        start = min((parse_trade_datetime(t.get("entry_date")) or datetime.min) for t in ordered)
+        end = max((parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min) for t in ordered)
+        symbol, entry_datetime = bucket_key
+        campaigns.append({
+            "campaign_id": "|".join([
+                str(symbol),
+                str(entry_datetime),
+                start.isoformat(),
+                end.isoformat(),
+                "1",
+            ]),
+            "bucket_key": bucket_key,
+            "start": start,
+            "end": end,
+            "trades": ordered,
+        })
     campaigns.sort(key=lambda c: c["start"], reverse=True)
     return campaigns
 
@@ -989,8 +973,15 @@ def dashboard():
     losses = [t for t in closed if t["pnl_abs"] < 0]
 
     # Average win/loss as % of entry cost
-    avg_win_pct = (sum(t["pnl_pct"] for t in wins if t["pnl_pct"] is not None) / len(wins)) if wins else 0
-    avg_loss_pct = (sum(t["pnl_pct"] for t in losses if t["pnl_pct"] is not None) / len(losses)) if losses else 0
+    # Capital-weighted average win/loss percent return
+    win_entry_notional = sum(abs(t["entry_price"] * t["size"]) for t in wins if t["entry_price"] and t["size"])
+    loss_entry_notional = sum(abs(t["entry_price"] * t["size"]) for t in losses if t["entry_price"] and t["size"])
+    avg_win_pct = (
+        sum((t["pnl_abs"] / abs(t["entry_price"] * t["size"])) * 100 * abs(t["entry_price"] * t["size"]) for t in wins if t["pnl_abs"] is not None and t["entry_price"] and t["size"]) / win_entry_notional
+    ) if win_entry_notional else 0
+    avg_loss_pct = (
+        sum((t["pnl_abs"] / abs(t["entry_price"] * t["size"])) * 100 * abs(t["entry_price"] * t["size"]) for t in losses if t["pnl_abs"] is not None and t["entry_price"] and t["size"]) / loss_entry_notional
+    ) if loss_entry_notional else 0
 
     # --- Avg days held (W | L) ---
     def days_held(t):
@@ -1165,9 +1156,14 @@ def dashboard():
     avg_loss_size = np.mean([t["size"] * t["entry_price"] for t in losses]) if losses else 0
 
     # --- Capital-weighted return, avg trade return, covariance(size, return), correlation ---
-    # Prepare values
     position_values = [t["size"] * t["entry_price"] for t in closed if t["size"] and t["entry_price"]]
     pnls = [t["pnl_abs"] for t in closed if t["size"] and t["entry_price"]]
+    # Capital-weighted return
+    total_position = sum(position_values)
+    capital_weighted_return = sum(pnls) / total_position if total_position else 0
+    # Avg trade return (now matches capital-weighted return)
+    avg_trade_return = capital_weighted_return
+    # Covariance(size, return)
     returns = []
     for t in closed:
         if t["direction"] == "long" and t["entry_price"]:
@@ -1176,16 +1172,9 @@ def dashboard():
             returns.append((t["entry_price"] - t["exit_price"]) / t["entry_price"] if t["exit_price"] is not None else 0)
         else:
             returns.append(0)
-    # Capital-weighted return
-    total_position = sum(position_values)
-    capital_weighted_return = sum(pnls) / total_position if total_position else 0
-    # Avg trade return
-    avg_trade_return = np.mean(returns) if returns else 0
-    # Covariance(size, return)
     avg_w = np.mean(position_values) if position_values else 0
     avg_r = np.mean(returns) if returns else 0
     covariance = np.mean([(w - avg_w) * (r - avg_r) for w, r in zip(position_values, returns)]) if position_values and returns else 0
-    # Correlation(size, return)
     sizing_corr = float(np.corrcoef(position_values, returns)[0,1]) if len(position_values) > 1 and len(returns) > 1 else 0
 
     # Median position value (optimal size proxy)
