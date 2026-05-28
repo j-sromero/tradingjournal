@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Import IBKR trades into SQLite from either Flex API XML or an IBKR HTML statement.
@@ -76,6 +77,40 @@ def normalize_trade_row(symbol, dt_raw, qty_raw, trade_price=0.0, ib_commission=
         "ib_commission": comm,
     }
 
+
+def aggregate_closed_trades(closed_rows):
+    """
+    Aggregate closed trades with the same symbol, entry_datetime, exit_datetime into a single row.
+    Sums quantity and commission, computes weighted average entry/exit price.
+    """
+    grouped = defaultdict(list)
+    for t in closed_rows:
+        key = (t["symbol"], t["entry_datetime"], t["exit_datetime"])
+        grouped[key].append(t)
+
+    aggregated = []
+    for key, group in grouped.items():
+        if len(group) == 1:
+            aggregated.append(group[0])
+        else:
+            total_qty = sum(abs(x["quantity"]) for x in group)
+            if total_qty == 0:
+                continue
+            entry_price = sum(abs(x["quantity"]) * x["entry_price"] for x in group) / total_qty
+            exit_price = sum(abs(x["quantity"]) * x["exit_price"] for x in group) / total_qty
+            ib_commission = sum(x["ib_commission"] for x in group)
+            aggregated.append({
+                "symbol": key[0],
+                "entry_datetime": key[1],
+                "exit_datetime": key[2],
+                "entry_price": round(entry_price, 6),
+                "exit_price": round(exit_price, 6),
+                "quantity": sum(x["quantity"] for x in group),
+                "ib_commission": round(ib_commission, 6),
+            })
+    for row in aggregated:
+        print(row)
+    return aggregated
 
 def init_db(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
@@ -373,7 +408,12 @@ def build_trade_rows(rows):
 
     closed_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"], r["exit_datetime"] or ""))
     open_rows.sort(key=lambda r: (r["symbol"], r["entry_datetime"]))
+    
     return closed_rows, open_rows
+# Usage example (main import logic):
+# closed_rows, open_rows = build_trade_rows(rows)
+# closed_rows_agg = aggregate_closed_trades(closed_rows)
+# ...
 
 
 def _row_exists(conn, r):
@@ -410,31 +450,38 @@ def _row_exists(conn, r):
 def insert_trades(db_path: str, rows):
     conn = sqlite3.connect(db_path)
     inserted = 0
+    skipped = 0
     try:
         for r in rows:
             if _row_exists(conn, r):
+                skipped += 1
                 continue
-            cur = conn.execute(
-                """
-                INSERT INTO trades
-                (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    r["symbol"],
-                    r["entry_datetime"],
-                    r["exit_datetime"],
-                    r["entry_price"],
-                    r["exit_price"],
-                    r["quantity"],
-                    r["ib_commission"],
-                ),
-            )
-            inserted += cur.rowcount
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO trades
+                    (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        r["symbol"],
+                        r["entry_datetime"],
+                        r["exit_datetime"],
+                        r["entry_price"],
+                        r["exit_price"],
+                        r["quantity"],
+                        r["ib_commission"],
+                    ),
+                )
+                inserted += cur.rowcount
+            except sqlite3.IntegrityError as e:
+                # If UNIQUE constraint fails, skip
+                print(f"[SKIP] IntegrityError for row: {r} ({e})")
+                skipped += 1
+                continue
         conn.commit()
     finally:
         conn.close()
-    skipped = max(0, len(rows) - inserted)
     return inserted, skipped
 
 # --- Merge open trades with same symbol and entry_datetime ---
@@ -457,5 +504,3 @@ def merge_open_trades(open_rows):
             m["ib_commission"] = round(c1 + c2, 6)
             m["entry_price"] = round((p1 * q1 + p2 * q2) / total_q, 6) if total_q else p1
     return list(merged.values())
-
-

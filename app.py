@@ -2457,9 +2457,12 @@ def v3_import():
 
 
             closed_rows, open_rows = v3_build_trade_rows(rows)
-            from v3_import_ibkr_trades import merge_open_trades as v3_merge_open_trades
+            
+            from v3_import_ibkr_trades import merge_open_trades as v3_merge_open_trades, aggregate_closed_trades as v3_aggregate_closed_trades
+            closed_rows_agg = v3_aggregate_closed_trades(closed_rows)
+
             open_rows_merged = v3_merge_open_trades(open_rows)
-            inserted_closed, skipped_closed = v3_insert_trades(V3_DB_PATH, closed_rows)
+            inserted_closed, skipped_closed = v3_insert_trades(V3_DB_PATH, closed_rows_agg)
             inserted_open, skipped_open = v3_insert_trades(V3_DB_PATH, open_rows_merged)
 
             inserted = inserted_closed + inserted_open
@@ -2623,8 +2626,7 @@ def playbook():
         for screenshot in screenshots:
             if screenshot and screenshot.filename:
                 fname = secure_filename(f"playbook_{trade_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{screenshot.filename}")
-                path = os.path.join(UPLOAD_DIR, fname)
-                screenshot.save(path)
+                screenshot.save(os.path.join(UPLOAD_DIR, fname))
                 db.execute("INSERT INTO screenshots (trade_id, filename, caption) VALUES (?, ?, ?)",
                            (trade_id, fname, ""))
         db.commit()
@@ -2835,7 +2837,7 @@ def _parse_interest_entries_from_html_table(content):
             if 'withholding' in row_lower and 'interest' in row_lower:
                 if date_key not in entries:
                     entries[date_key] = {'gross': 0, 'withholding': 0}
-                entries[date_key]['withholding'] = abs(amount)
+                entries[date_key]['withholding'] = abs(amount)  # Make positive
             elif 'credit interest' in row_lower and 'usd' in row_lower:
                 if date_key not in entries:
                     entries[date_key] = {'gross': 0, 'withholding': 0}
