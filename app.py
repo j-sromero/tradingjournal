@@ -1653,6 +1653,51 @@ def v3_chart_view():
     exit_price = (request.args.get("exit_price", "") or "").strip()
     et_tz = ZoneInfo("America/New_York")
 
+    # --- Prev/Next trade navigation logic (by entry_datetime, same symbol) ---
+    prev_id = None
+    next_id = None
+    current_row = None
+    conn = sqlite3.connect(V3_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Try to find current trade by id
+        if trade_id_raw.isdigit():
+            current_row = conn.execute(
+                "SELECT id, symbol, entry_datetime FROM trades WHERE id=?",
+                (int(trade_id_raw),)
+            ).fetchone()
+        # If not found, try by symbol and entry_datetime
+        if not current_row:
+            entry_key = _normalize_v3_dt(entry)
+            current_row = conn.execute(
+                "SELECT id, symbol, entry_datetime FROM trades WHERE UPPER(symbol)=? AND entry_datetime=?",
+                (symbol, entry_key)
+            ).fetchone()
+        if current_row:
+            # Previous trade (earlier entry_datetime, any symbol)
+            prev = conn.execute(
+                "SELECT id FROM trades WHERE entry_datetime < ? ORDER BY entry_datetime DESC LIMIT 1",
+                (current_row["entry_datetime"],)
+            ).fetchone()
+            if prev:
+                prev_id = prev["id"]
+            # Next trade (later entry_datetime, any symbol)
+            nxt = conn.execute(
+                "SELECT id FROM trades WHERE entry_datetime > ? ORDER BY entry_datetime ASC LIMIT 1",
+                (current_row["entry_datetime"],)
+            ).fetchone()
+            if nxt:
+                next_id = nxt["id"]
+    finally:
+        conn.close()
+    trade_id_raw = (request.args.get("trade_id", "") or "").strip()
+    symbol = (request.args.get("symbol", "") or "").strip().upper() or "AAPL"
+    entry = (request.args.get("entry", "") or "").strip()
+    exit_dt = (request.args.get("exit", "") or "").strip()
+    entry_price = (request.args.get("entry_price", "") or "").strip()
+    exit_price = (request.args.get("exit_price", "") or "").strip()
+    et_tz = ZoneInfo("America/New_York")
+
     def _normalize_v3_dt(value):
         text = (value or "").strip()
         if not text:
@@ -1713,18 +1758,17 @@ def v3_chart_view():
 
         return None
 
-    if not entry_price or not entry or (not exit_price and not exit_dt):
-        row = _load_v3_trade_row()
-        if row:
-            symbol = symbol or (row["symbol"] or "AAPL")
-            if not entry:
-                entry = (row["entry_datetime"] or "").strip()
-            if not exit_dt:
-                exit_dt = (row["exit_datetime"] or "").strip()
-            if not entry_price and row["entry_price"] is not None:
-                entry_price = str(row["entry_price"])
-            if not exit_price and row["exit_price"] is not None:
-                exit_price = str(row["exit_price"])
+    row = _load_v3_trade_row()
+    if row:
+        symbol = row["symbol"] or symbol or "AAPL"
+        if not entry:
+            entry = (row["entry_datetime"] or "").strip()
+        if not exit_dt:
+            exit_dt = (row["exit_datetime"] or "").strip()
+        if not entry_price and row["entry_price"] is not None:
+            entry_price = str(row["entry_price"])
+        if not exit_price and row["exit_price"] is not None:
+            exit_price = str(row["exit_price"])
 
     def _fmt_hint(value):
         text = (value or "").strip()
@@ -1765,6 +1809,8 @@ def v3_chart_view():
         exit_price_hint=_fmt_price(exit_price),
         entry_epoch=_hint_to_epoch(entry),
         exit_epoch=_hint_to_epoch(exit_dt),
+        prev_id=prev_id,
+        next_id=next_id,
     )
 
 

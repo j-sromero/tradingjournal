@@ -3,6 +3,11 @@
 
 {% block content %}
 <div class="card" style="margin-bottom:1rem; display:flex; gap: 3rem; align-items:center; flex-wrap:wrap;">
+  <button id="prev_trade_btn"
+    style="min-width:2.5rem; min-height:2.5rem; border-radius:50%; border:1px solid #363a45; background: {% if prev_id %}#1e222d{% else %}#23242a80{% endif %}; color: {% if prev_id %}#d1d4dc{% else %}#888{% endif %}; font-size:1.5rem; cursor: {% if prev_id %}pointer{% else %}not-allowed{% endif %}; display:flex; align-items:center; justify-content:center;"
+    {% if not prev_id %}disabled{% endif %} title="Previous trade">
+    &#8592;
+  </button>
   <div><strong> {{ symbol }} </strong> </div>
   <div><strong>Entry:</strong> {{ entry_hint }} @ {{ entry_price_hint }}</div>
   <div><strong>Exit:</strong> {{ exit_hint }} @ {{ exit_price_hint }}</div>
@@ -16,6 +21,11 @@
     </select>
     <button id="log_toggle" style="padding:.25rem .75rem; border-radius:4px; background:#1e222d; color:#d1d4dc; border:1px solid #363a45; cursor:pointer; font-size:.85rem;">Log</button>
   </div>
+  <button id="next_trade_btn"
+    style="min-width:2.5rem; min-height:2.5rem; border-radius:50%; border:1px solid #363a45; background: {% if next_id %}#1e222d{% else %}#23242a80{% endif %}; color: {% if next_id %}#d1d4dc{% else %}#888{% endif %}; font-size:1.5rem; cursor: {% if next_id %}pointer{% else %}not-allowed{% endif %}; display:flex; align-items:center; justify-content:center;"
+    {% if not next_id %}disabled{% endif %} title="Next trade">
+    &#8594;
+  </button>
 </div>
 
 <div class="card" style="padding:0; overflow:hidden; position:relative;">
@@ -28,6 +38,25 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  // Prev/Next trade navigation
+  const prevId = {{ prev_id|tojson|default('null') }};
+  const nextId = {{ next_id|tojson|default('null') }};
+  const prevBtn = document.getElementById("prev_trade_btn");
+  const nextBtn = document.getElementById("next_trade_btn");
+  if (prevBtn && prevId) {
+    prevBtn.addEventListener("click", function () {
+      window.location.href = `/v3/chart?trade_id=${prevId}`;
+    });
+  }
+  if (nextBtn && nextId) {
+    nextBtn.addEventListener("click", function () {
+      window.location.href = `/v3/chart?trade_id=${nextId}`;
+    });
+  }
+});
+</script>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 (function () {
