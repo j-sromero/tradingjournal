@@ -2170,6 +2170,8 @@ def analytics():
             years = [int(row[0]) for row in cur.fetchall() if row[0]]
         finally:
             conn.close()
+    # Add 'All years' option at the beginning
+    years_with_all = ['all'] + years if years else ['all']
 
     def _to_iso(dt_text):
         text = (dt_text or "").strip()
@@ -2188,7 +2190,8 @@ def analytics():
                   AND exit_price IS NOT NULL
             """
             params = []
-            if year:
+            # Only filter by year if a specific year is selected and not 'all'
+            if year and year != 'all':
                 query += " AND (substr(entry_datetime, 1, 4) = ? OR substr(exit_datetime, 1, 4) = ?)"
                 params = [year, year]
             query += " ORDER BY entry_datetime ASC, id ASC"
@@ -2294,8 +2297,8 @@ def analytics():
         trade_histogram=trade_histogram,
         worst_trades=impact_trades,
         suggested_sizing_rule=median_size,
-        years=years,
-        year=int(year) if year else (years[0] if years else None))
+        years=years_with_all,
+        year=year if year else 'all')
 
 
 @app.route("/v3")
