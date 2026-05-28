@@ -155,8 +155,24 @@ document.addEventListener("DOMContentLoaded", function () {
     const entrySec = resolveHintSeconds(ENTRY_EPOCH, ENTRY_HINT);
     const exitSec = resolveHintSeconds(EXIT_EPOCH, EXIT_HINT);
 
-    const entryIdx = findCandleIndexForTime(candles, entrySec, interval);
-    if (entryIdx >= 0) {
+   
+    // For daily, compare by day string, fallback to closest if not found
+    let entryIdx = findCandleIndexForTime(candles, entrySec, interval);
+    if (interval === "1d" && entryIdx === -1 && candles && candles.length && entrySec != null) {
+      // Fallback: find closest candle by timestamp
+      let bestIdx = 0;
+      let bestDiff = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < candles.length; i++) {
+        const d = Math.abs(candles[i].time - entrySec);
+        if (d < bestDiff) {
+          bestDiff = d;
+          bestIdx = i;
+        }
+      }
+      entryIdx = bestIdx;
+    }
+
+    if (entryIdx >= 0 && candles && candles.length) {
       markers.push({
         time: candles[entryIdx].time,
         position: "belowBar",
@@ -166,8 +182,21 @@ document.addEventListener("DOMContentLoaded", function () {
       });
     }
 
-    const exitIdx = findCandleIndexForTime(candles, exitSec, interval);
-    if (exitIdx >= 0) {
+    let exitIdx = findCandleIndexForTime(candles, exitSec, interval);
+    if (interval === "1d" && exitIdx === -1 && candles && candles.length && exitSec != null) {
+      let bestIdx = 0;
+      let bestDiff = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < candles.length; i++) {
+        const d = Math.abs(candles[i].time - exitSec);
+        if (d < bestDiff) {
+          bestDiff = d;
+          bestIdx = i;
+        }
+      }
+      exitIdx = bestIdx;
+    }
+    
+    if (exitIdx >= 0 && candles && candles.length) {
       markers.push({
         time: candles[exitIdx].time,
         position: "aboveBar",
