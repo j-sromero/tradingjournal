@@ -1879,8 +1879,10 @@ def api_v3_ohlcv():
         # If index is not tz-aware, localize to UTC then convert to ET
         idx = df.index
         if getattr(idx, "tz", None) is None:
-            idx = idx.tz_localize("UTC")
-        idx = idx.tz_convert(et_tz)
+            idx = idx.tz_localize("UTC").tz_convert(et_tz)
+        elif str(idx.tz) != str(et_tz):
+            idx = idx.tz_convert(et_tz)
+        # If already tz-aware and in ET, leave as is
         df.index = idx
 
         # Only check if entry_dt is provided
@@ -1933,22 +1935,28 @@ def api_v3_ohlcv():
             session_vwap = df["Close"]
 
         def _bar_timestamp(ts_value):
-            """Return unix seconds for chart bars with correct ET alignment.
-
-            - Intraday: use source timezone-aware timestamp.
-            - Daily/weekly/monthly: anchor to 16:00 ET on that session date
-              to avoid day-shift artifacts when formatting in ET.
+            """
+            For daily/weekly/monthly bars, if the index hour >= 16, shift the date forward by one day before setting the timestamp to 12:00 ET.
+            For intraday, use the actual timestamp.
             """
             if interval in intraday_intervals:
                 return int(ts_value.timestamp())
-
+            # For daily/weekly/monthly, shift date if hour >= 16
             d = ts_value.date()
-            dt_et = datetime(d.year, d.month, d.day, 16, 0, tzinfo=et_tz)
+            if hasattr(ts_value, 'hour') and ts_value.hour >= 16:
+                from datetime import timedelta
+                d = d + timedelta(days=1)
+            dt_et = datetime(d.year, d.month, d.day, 12, 0, tzinfo=et_tz)
             return int(dt_et.timestamp())
 
         candles, volume, close_line, e6, e10, e20, e21, s50, s200, vwap = [], [], [], [], [], [], [], [], [], []
-        for ts, row in df.iterrows():
+        debug_rows = []
+        for idx, (ts, row) in enumerate(df.iterrows()):
             t = _bar_timestamp(ts)
+            if idx >= len(df) - 5:
+                # Print debug info for last 5 bars
+                from datetime import datetime as dt, timezone
+                dt_utc = dt.fromtimestamp(t, tz=timezone.utc)
             candles.append({
                 "time": t,
                 "open":  round(float(row["Open"]),  4),
@@ -1973,6 +1981,11 @@ def api_v3_ohlcv():
             s200.append({"time": t, "value": round(float(v200), 4)})
             vwap.append({"time": t, "value": round(float(vvwap), 4)})
 
+        
+        for c in candles[-3:]:
+            t = c["time"]
+            dt_utc = dt.fromtimestamp(t, tz=timezone.utc)
+            dt_et = dt_utc.astimezone(et_tz)
         return jsonify({
             "candles": candles,
             "volume": volume,
