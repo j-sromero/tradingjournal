@@ -453,6 +453,42 @@ def insert_trades(db_path: str, rows):
     skipped = 0
     try:
         for r in rows:
+            # First, try to find an open trade to update
+            existing = conn.execute(
+                """
+                SELECT id, ib_commission FROM trades
+                WHERE symbol = ?
+                  AND entry_datetime = ?
+                  AND entry_price = ?
+                  AND exit_datetime IS NULL
+                  AND exit_price IS NULL
+                LIMIT 1
+                """,
+                (r["symbol"], r["entry_datetime"], r["entry_price"])
+            ).fetchone()
+            if (
+                existing
+                and r.get("exit_datetime")
+                and r.get("exit_price") is not None
+            ):
+                # Update the open trade with exit info and add commission
+                new_comm = float(existing[1] or 0) + float(r.get("ib_commission") or 0)
+                conn.execute(
+                    """
+                    UPDATE trades
+                    SET exit_datetime = ?, exit_price = ?, ib_commission = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        r["exit_datetime"],
+                        r["exit_price"],
+                        new_comm,
+                        existing[0],
+                    ),
+                )
+                inserted += 1
+                continue
+            # Otherwise, fall back to normal insert if not duplicate
             if _row_exists(conn, r):
                 skipped += 1
                 continue

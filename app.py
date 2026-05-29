@@ -2324,8 +2324,10 @@ def v3_overview():
         "total_commission": 0.0,
         "realized_pnl": 0.0,
     }
+
     recent_rows = []
     v3_available = False
+    just_added = int(request.args.get("just_added", 0))
 
     def _fmt_v3_dt(value):
         text = (value or "").strip()
@@ -2390,6 +2392,8 @@ def v3_overview():
                             "ib_commission": round(float(r["ib_commission"] or 0), 2),
                         }
                     )
+                if just_added > 0:
+                    recent_rows = recent_rows[:just_added]
         finally:
             conn.close()
 
@@ -2495,7 +2499,7 @@ def v3_import():
                 if skipped:
                     flash(f"⚠️ Skipped {skipped} duplicate row(s).", "warning")
 
-            return redirect(url_for("v3_overview"))
+            return redirect(url_for("v3_overview",just_added=inserted))
 
         except Exception as e:
             app.logger.exception("v3 import failed")
