@@ -21,6 +21,7 @@ from flask import (
 from werkzeug.utils import secure_filename
 import numpy as np
 import yfinance as yf
+from market_groups import fetch_finviz_groups_data, fetch_market_group_top10
 
 # ---------- Config ----------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -1137,10 +1138,8 @@ def dashboard():
     month_profit_factor = round(month_gross_wins / month_gross_losses, 2) if month_gross_losses else None
 
     month_trade_pnl = sum(t["pnl_abs"] for t in month_trades)
-    print(f"DEBUG: month_trade_pnl={month_trade_pnl}, cash_interest_this_month={cash_interest_this_month}")
     month_pnl = month_trade_pnl + cash_interest_this_month
     month_progress = min(100, (month_pnl / monthly_goal * 100)) if monthly_goal else 0
-    print(f"DEBUG: month_trades={len(month_trades)}, month_wins={len(month_wins)}, month_losses={len(month_losses)}, month_avg_win={month_avg_win}, month_avg_loss={month_avg_loss}, month_win_rate={month_win_rate}, month_profit_factor={month_profit_factor}")
     s = streaks(closed_raw)
 
     # Calculate current average R per winning trade
@@ -1263,6 +1262,25 @@ def dashboard():
         stats=stats, equity_labels=equity_labels, equity_data=equity_data,
         daily=dict(daily), recent=recent, alerts=alerts)
 
+# ---------- Market Groups ----------
+@app.route('/market-groups')
+def market_groups():
+    try:
+        groups_data = fetch_finviz_groups_data()
+    except Exception as e:
+        flash(f'Failed to load Finviz market groups: {e}', 'warning')
+        groups_data = []
+    return render_template('market_groups.html', groups_data=groups_data)
+
+@app.route('/api/market-groups/top10')
+def api_market_groups_top10():
+    industry = request.args.get('industry', '').strip()
+    try:
+        data = fetch_market_group_top10(industry)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"rows": [], "url": None, "error": str(e)}), 500
+    
 # ---------- Routes: trades ----------
 @app.route("/trades")
 def trades_list():

@@ -1,0 +1,1027 @@
+{% extends "base.html" %}
+
+{% block title %}Market Groups{% endblock %}
+
+{% block content %}
+<section class="page-header market-groups-header">
+  <div>
+    <h1>Market Groups</h1>
+    <p class="muted">A glanceable view of Finviz industry performance across multiple timeframes.</p>
+  </div>
+  <div class="header-actions">
+    <button class="btn" id="refresh-groups" type="button">Refresh</button>
+  </div>
+</section>
+
+<section class="card market-groups-shell">
+  <div class="market-toolbar">
+    <div class="timeframe-pills" id="timeframe-pills" role="tablist" aria-label="Timeframe selector">
+      <button class="pill" data-key="1d" role="tab" aria-selected="true">1D</button>
+      <button class="pill" data-key="1w" role="tab" aria-selected="false">1W</button>
+      <button class="pill is-active" data-key="1m" role="tab" aria-selected="false">1M</button>
+      <button class="pill" data-key="3m" role="tab" aria-selected="false">3M</button>
+      <button class="pill" data-key="6m" role="tab" aria-selected="false">6M</button>
+      <button class="pill" data-key="1y" role="tab" aria-selected="false">1Y</button>
+      <button class="pill" data-key="ytd" role="tab" aria-selected="false">YTD</button>
+    </div>
+
+    <div class="market-toolbar-right">
+      <input id="group-search" class="search-input" type="search" placeholder="Filter industries…" autocomplete="off" />
+      <label class="toggle-inline">
+        <input type="checkbox" id="show-all-metrics" />
+        <span>Show all metrics</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="summary-grid" id="summary-grid">
+    <article class="summary-card positive">
+      <div class="summary-label">Leader</div>
+      <div class="summary-name" id="leader-name">—</div>
+      <div class="summary-value" id="leader-value">—</div>
+    </article>
+    <article class="summary-card negative">
+      <div class="summary-label">Laggard</div>
+      <div class="summary-name" id="laggard-name">—</div>
+      <div class="summary-value" id="laggard-value">—</div>
+    </article>
+    <article class="summary-card neutral">
+      <div class="summary-label">Median</div>
+      <div class="summary-name">Selected timeframe</div>
+      <div class="summary-value" id="median-value">—</div>
+    </article>
+    <article class="summary-card neutral">
+      <div class="summary-label">Breadth</div>
+      <div class="summary-name">Positive groups</div>
+      <div class="summary-value" id="breadth-value">—</div>
+    </article>
+  </div>
+
+  <div class="groups-grid" id="groups-grid"></div>
+</section>
+
+<style>
+  .market-groups-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .market-groups-header h1 {
+    margin: 0 0 .25rem;
+  }
+
+  .market-groups-shell {
+    padding: 1rem;
+  }
+
+  .market-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+  }
+
+  .timeframe-pills {
+    display: flex;
+    gap: .5rem;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    border: 1px solid var(--border-color, #334155);
+    background: var(--card-bg, #111827);
+    color: inherit;
+    padding: .45rem .8rem;
+    border-radius: 999px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .pill.is-active {
+    background: var(--accent, #2563eb);
+    color: white;
+    border-color: var(--accent, #2563eb);
+  }
+
+  .market-toolbar-right {
+    display: flex;
+    gap: .75rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .search-input {
+    min-width: 220px;
+    padding: .55rem .75rem;
+    border-radius: .75rem;
+    border: 1px solid var(--border-color, #334155);
+    background: var(--card-bg, #111827);
+    color: inherit;
+  }
+
+  .toggle-inline {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .95rem;
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .75rem;
+    margin-bottom: 1rem;
+  }
+
+  .summary-card {
+    border: 1px solid var(--border-color, #334155);
+    border-radius: 1rem;
+    padding: .9rem 1rem;
+    background: var(--panel-bg, rgba(255, 255, 255, .03));
+  }
+
+  .summary-card.positive {
+    box-shadow: inset 0 0 0 1px rgba(16, 185, 129, .2);
+  }
+
+  .summary-card.negative {
+    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, .2);
+  }
+
+  .summary-label {
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    opacity: .7;
+  }
+
+  .summary-name {
+    margin-top: .35rem;
+    font-weight: 700;
+  }
+
+  .summary-value {
+    margin-top: .35rem;
+    font-size: 1.3rem;
+    font-weight: 800;
+  }
+
+  .groups-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: .85rem;
+  }
+
+  .group-card {
+    position: relative;
+    border: 1px solid var(--border-color, #334155);
+    border-radius: 1rem;
+    padding: .9rem;
+    background: var(--panel-bg, rgba(255, 255, 255, .03));
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: .75rem;
+  }
+
+  .group-top {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: start;
+    gap: .75rem;
+    min-height: 3.5rem;
+  }
+
+  .group-rank {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    font-weight: 800;
+    font-size: .9rem;
+    background: rgba(148, 163, 184, .15);
+  }
+
+  .group-name {
+    font-weight: 700;
+    line-height: 1.2;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 2.6rem;
+  }
+
+  .group-main {
+    font-size: 1.6rem;
+    font-weight: 800;
+  }
+
+  .group-main.positive {
+    color: #10b981;
+  }
+
+  .group-main.negative {
+    color: #ef4444;
+  }
+
+  .group-main.neutral {
+    color: #94a3b8;
+  }
+
+  .spark-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .5rem;
+    align-items: stretch;
+  }
+
+  .metric-chip {
+    border-radius: .75rem;
+    background: rgba(148, 163, 184, .08);
+    text-align: center;
+    min-height: 3.1rem;
+    padding: .45rem .35rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+  }
+
+  .metric-chip .k {
+    display: block;
+    font-size: .68rem;
+    line-height: 1;
+    margin-bottom: .2rem;
+    opacity: .7;
+  }
+
+  .metric-chip .v {
+    font-size: .78rem;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
+
+  .metric-chip .v.positive {
+    color: #10b981;
+  }
+
+  .metric-chip .v.negative {
+    color: #ef4444;
+  }
+
+  .metric-chip .v.neutral {
+    color: #cbd5e1;
+  }
+
+  .group-link {
+    font-size: .82rem;
+    opacity: .75;
+    text-decoration: none;
+  }
+
+  .empty-state-inline {
+    border: 1px dashed var(--border-color, #334155);
+    border-radius: 1rem;
+    padding: 1.2rem;
+    text-align: center;
+    opacity: .8;
+  }
+
+  @media (max-width: 900px) {
+    .summary-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 640px) {
+    .market-groups-header {
+      align-items: start;
+      flex-direction: column;
+    }
+
+    .summary-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .groups-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .search-input {
+      min-width: unset;
+      width: 100%;
+    }
+  }
+
+  .group-hover-pop {
+    position: absolute;
+    left: calc(100% + .75rem);
+    top: .25rem;
+    width: 560px;
+    max-width: min(560px, 96vw);
+    background: #0f172a;
+    border: 1px solid rgba(148, 163, 184, .24);
+    border-radius: 1rem;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .4);
+    padding: 1rem;
+    z-index: 60;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(6px);
+    transition: opacity 140ms ease, transform 140ms ease;
+  }
+
+  .group-card:hover .group-hover-pop,
+  .group-card:focus-within .group-hover-pop,
+  .group-card.is-open .group-hover-pop,
+  .group-hover-pop:hover,
+  .group-hover-pop:focus-within {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .group-hover-pop.is-left {
+    left: auto;
+    right: calc(100% + .75rem);
+  }
+
+  .pop-title {
+    font-weight: 800;
+    font-size: 1rem;
+    margin-bottom: .15rem;
+  }
+
+  .pop-subtitle {
+    font-size: .86rem;
+    opacity: .72;
+    margin-bottom: .85rem;
+  }
+
+  .pop-loading,
+  .pop-error {
+    font-size: .9rem;
+    opacity: .8;
+    padding: .35rem 0;
+  }
+
+  .pop-list {
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+    max-height: 520px;
+    overflow: auto;
+    padding-right: .2rem;
+  }
+
+  .pop-row {
+    background: rgba(148, 163, 184, .08);
+    border: 1px solid rgba(148, 163, 184, .12);
+    border-radius: .85rem;
+    padding: .7rem .8rem;
+  }
+
+  .pop-row-top {
+    display: grid;
+    grid-template-columns: 2rem 5rem 1fr auto;
+    gap: .6rem;
+    align-items: center;
+    margin-bottom: .45rem;
+  }
+
+  .pop-row-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .45rem;
+  }
+
+  .pop-metric {
+    background: rgba(255, 255, 255, .035);
+    border-radius: .65rem;
+    padding: .45rem .5rem;
+    min-height: 3rem;
+  }
+
+  .pop-metric-wide {
+    grid-column: span 4;
+  }
+
+  .pop-metric-k {
+    display: block;
+    font-size: .67rem;
+    line-height: 1;
+    opacity: .65;
+    margin-bottom: .25rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  .pop-metric-wide .pop-metric-v {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    line-height: 1.3;
+  }
+
+  .pop-metric-v {
+    display: block;
+    font-size: .8rem;
+    line-height: 1.15;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pop-metric-v.positive {
+    color: #10b981;
+  }
+
+  .pop-metric-v.negative {
+    color: #ef4444;
+  }
+
+  .pop-rank {
+    opacity: .65;
+    font-weight: 800;
+    text-align: center;
+  }
+
+  .pop-ticker {
+    font-weight: 800;
+    letter-spacing: .02em;
+  }
+
+  .pop-name {
+    opacity: .88;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pop-ticker {
+    font-weight: 800;
+    letter-spacing: .02em;
+  }
+
+  .pop-ytd-label {
+    color: #94a3b8;
+    margin-right: .35rem;
+    font-weight: 600;
+  }
+
+  .pop-ytd {
+    text-align: right;
+    font-weight: 800;
+    color: inherit;
+  }
+
+  .pop-ytd-value.positive {
+    color: #10b981;
+  }
+
+  .pop-ytd-value.negative {
+    color: #ef4444;
+  }
+
+  .pop-footer {
+    display: inline-block;
+    padding: .35rem 0;
+    font-size: .82rem;
+    opacity: .82;
+    text-decoration: none;
+  }
+
+  .pop-footer a {
+    display: inline-block;
+    padding: .35rem .1rem;
+    font-size: .8rem;
+    opacity: .78;
+    text-decoration: none;
+    position: relative;
+    z-index: 2;
+  }
+
+  @media (max-width: 900px) {
+    .group-hover-pop {
+      left: 0;
+      right: 0;
+      top: calc(100% + .55rem);
+      width: auto;
+      max-width: none;
+    }
+
+    .group-hover-pop.is-left {
+      right: 0;
+    }
+
+    .pop-row-top {
+      grid-template-columns: 1.8rem 4.5rem 1fr auto;
+    }
+
+    .pop-row-metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  .pop-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-right: 44px; 
+  }
+
+  .pop-titlewrap {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .pop-copy-test {
+    flex: 0 0 auto;
+    display: inline-block;
+    padding: 8px 12px;
+    background: red;
+    color: white;
+    border: 2px solid yellow;
+    font-weight: 700;
+    position: relative;
+    z-index: 9999;
+    pointer-events: auto;
+  }
+
+  .group-popup,
+  .pop-panel,
+  .pop-content {
+    position: relative;
+  }
+
+  .pop-copy-icon {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 9999;
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 8px;
+    background: rgba(255,255,255,.04);
+    color: #cbd5e1;
+    pointer-events: auto;
+  }
+
+  .pop-copy-icon:hover {
+    background: rgba(255,255,255,.08);
+    color: #fff;
+  }
+
+  .pop-copy-icon svg {
+    width: 15px;
+    height: 15px;
+    pointer-events: none;
+  }
+
+  .pop-copy-icon.is-copied {
+    color: #10b981;
+    border-color: rgba(16,185,129,.32);
+    background: rgba(16,185,129,.08);
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const initialData = {{ groups_data| tojson
+  }};
+  let currentKey = '1m';
+  let searchTerm = '';
+  let showAllMetrics = false;
+
+  const metricKeys = ['1d', '1w', '1m', '3m', '6m', '1y', 'ytd'];
+  const grid = document.getElementById('groups-grid');
+  const pills = document.querySelectorAll('.pill');
+  pills.forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.metric === currentKey);
+  });
+  const searchInput = document.getElementById('group-search');
+  const showAllCheckbox = document.getElementById('show-all-metrics');
+  const refreshButton = document.getElementById('refresh-groups');
+
+  const leaderName = document.getElementById('leader-name');
+  const leaderValue = document.getElementById('leader-value');
+  const laggardName = document.getElementById('laggard-name');
+  const laggardValue = document.getElementById('laggard-value');
+  const medianValue = document.getElementById('median-value');
+  const breadthValue = document.getElementById('breadth-value');
+
+  function clsForValue(v) {
+    if (v > 0) return 'positive';
+    if (v < 0) return 'negative';
+    return 'neutral';
+  }
+
+  function syncActivePill() {
+    pills.forEach(pill => {
+      pill.classList.toggle('active', pill.dataset.metric === currentKey);
+    });
+  }
+
+  function fmtPct(v) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    const sign = v > 0 ? '+' : '';
+    return `${sign}${Number(v).toFixed(2)}%`;
+  }
+
+  function filteredRows() {
+    return initialData
+      .filter(row => !searchTerm || row.label.toLowerCase().includes(searchTerm))
+      .sort((a, b) => (b[currentKey] ?? -Infinity) - (a[currentKey] ?? -Infinity));
+  }
+
+  function renderSummary(rows) {
+    if (!rows.length) {
+      leaderName.textContent = laggardName.textContent = '—';
+      leaderValue.textContent = laggardValue.textContent = medianValue.textContent = breadthValue.textContent = '—';
+      return;
+    }
+    const leader = rows[0];
+    const laggard = rows[rows.length - 1];
+    const values = rows.map(r => Number(r[currentKey] ?? 0)).sort((a, b) => a - b);
+    const median = values[Math.floor(values.length / 2)];
+    const positives = rows.filter(r => Number(r[currentKey] ?? 0) > 0).length;
+
+    leaderName.textContent = leader.label;
+    leaderValue.textContent = fmtPct(leader[currentKey]);
+    laggardName.textContent = laggard.label;
+    laggardValue.textContent = fmtPct(laggard[currentKey]);
+    medianValue.textContent = fmtPct(median);
+    breadthValue.textContent = `${positives}/${rows.length}`;
+  }
+
+  function metricKeysToShow() {
+    if (showAllMetrics) return metricKeys;
+    return ['1w', '1m', '3m', 'ytd'];
+  }
+
+  function renderCards() {
+    const rows = Array.isArray(filteredRows()) ? filteredRows() : [];
+    syncActivePill();
+    renderSummary(rows);
+
+    if (!grid) {
+      console.error('groups-grid element not found');
+      return;
+    }
+
+    if (!rows.length) {
+      grid.innerHTML = '<div class="empty-state-inline">No industries match your filter.</div>';
+      bindCardHoverPopups();
+      return;
+    }
+
+    const keys = metricKeysToShow();
+
+    grid.innerHTML = rows.map((row, idx) => {
+      const label = String(row?.label ?? 'Unknown industry');
+      const tickerSlug = String(row?.ticker_slug ?? '');
+      const screenerPath = String(row?.screener_url ?? '');
+      const screenerHref = tickerSlug ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},
+                                         sh_avgvol_o500,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&
+                                         o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
+        : 'https://finviz.com/groups.ashx';
+      const mainValue = Number(row?.[currentKey]);
+
+      return `
+        <article class="group-card"
+                tabindex="0"
+                data-industry="${escapeHtml(tickerSlug)}"
+                data-label="${escapeHtml(label)}"
+                data-screener-href="${escapeHtml(screenerHref)}">
+          <div class="group-top">
+            <div>
+              <div class="group-name">${escapeHtml(label)}</div>
+              <a class="group-link" href="${escapeHtml(screenerHref)}" target="_blank" rel="noopener noreferrer">Open screener ↗</a>
+            </div>
+            <div class="group-rank">${idx + 1}</div>
+          </div>
+
+          <div class="group-main ${clsForValue(mainValue)}">${fmtPct(mainValue)}</div>
+
+          <div class="spark-metrics">
+            ${keys.map(k => {
+        const val = Number(row?.[k]);
+        return `
+                <div class="metric-chip">
+                  <span class="k">${escapeHtml(k.toUpperCase())}</span>
+                  <span class="v ${clsForValue(val)}">${fmtPct(val)}</span>
+                </div>
+              `;
+      }).join('')}
+          </div>
+
+          <div class="group-hover-pop" role="dialog" aria-label="Top performers">
+            <div class="pop-title">Top 10 performers</div>
+            <div class="pop-subtitle">${escapeHtml(label)}</div>
+            <div class="pop-loading">Hover to load leaders for this industry.</div>
+          </div>
+        </article>
+      `;
+    }).join('');
+
+    bindCardHoverPopups();
+  }
+
+  pills.forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentKey = btn.dataset.key;
+      pills.forEach(p => {
+        const active = p === btn;
+        p.classList.toggle('is-active', active);
+        p.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      renderCards();
+    });
+  });
+
+  searchInput.addEventListener('input', (e) => {
+    searchTerm = e.target.value.trim().toLowerCase();
+    renderCards();
+  });
+
+  showAllCheckbox.addEventListener('change', (e) => {
+    showAllMetrics = e.target.checked;
+    renderCards();
+  });
+
+
+
+  const popupCache = new Map();
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  async function loadTopPerformers(card) {
+    const industry = card.dataset.industry;
+    const label = card.dataset.label || 'Industry';
+    const screenerHref = card.dataset.screenerHref || '#';
+    const pop = card.querySelector('.group-hover-pop');
+    if (!industry || !pop) return;
+
+    const rect = card.getBoundingClientRect();
+
+    const gap = 12;
+    const popupWidth = Math.min(560, window.innerWidth * 0.96);
+    const spaceRight = window.innerWidth - rect.right;
+    const spaceLeft = rect.left;
+
+    const placeLeft = spaceRight < (popupWidth + gap) && spaceLeft > spaceRight;
+    pop.classList.toggle('is-left', placeLeft);
+
+    if (popupCache.has(industry)) {
+      renderPopup(pop, label, screenerHref, popupCache.get(industry));
+      return;
+    }
+
+    pop.innerHTML = `<div class="pop-title">Top 10 performers</div><div class="pop-subtitle">${escapeHtml(label)}</div><div class="pop-loading">Loading…</div>`;
+
+    try {
+      const res = await fetch(`/api/market-groups/top10?industry=${encodeURIComponent(industry)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      popupCache.set(industry, data);
+      renderPopup(pop, label, screenerHref, data);
+    } catch (err) {
+      pop.innerHTML = `<div class="pop-title">Top 10 performers</div><div class="pop-subtitle">${escapeHtml(label)}</div><div class="pop-error">Couldn't load top performers.</div><div class="pop-footer"><a href="${escapeHtml(normalizeFinvizUrl(screenerHref))}" target="_blank" rel="noopener noreferrer">Open full screener ↗</a></div>`;
+    }
+  }
+
+  function normalizeFinvizUrl(url) {
+    const value = String(url || '').trim();
+    if (!value) return 'https://finviz.com/groups.ashx';
+    if (value.startsWith('http://') || value.startsWith('https://')) return value;
+    return `https://finviz.com/${value.replace(/^\/+/, '')}`;
+  }
+
+  function renderPopup(pop, label, screenerHref, data) {
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    const finalHref = normalizeFinvizUrl((data && data.url) || screenerHref);
+    const starredAcrossPopup = rows
+      .flatMap(r => (Array.isArray(r.related_ranked) ? r.related_ranked : [])
+        .filter(x => x.reciprocal)
+        .map(x => x.ticker))
+      .filter((t, i, arr) => arr.indexOf(t) === i);
+
+    pop.innerHTML = `
+    <div class="pop-titlebar">
+      <div class="pop-titlewrap">
+        <div class="pop-title">Top 10 performers</div>
+        <div class="pop-subtitle">${escapeHtml(label)}</div>
+      </div>
+      <button
+        class="pop-copy-icon"
+        type="button"
+        aria-label="Copy starred peers"
+        title="Copy starred peers"
+        data-copy="${escapeHtml(starredAcrossPopup.join(', '))}"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+      </button>
+    </div>
+    <div class="pop-list">
+      ${rows.length ? rows.map((r, i) => `
+        <div class="pop-row">
+          <div class="pop-row-top">
+            <div class="pop-rank">${Number(r.rank ?? (i + 1))}</div>
+            <div class="pop-ticker">${escapeHtml(r.ticker)}</div>
+            <div class="pop-name">${escapeHtml(r.company)}</div>
+            <div class="pop-ytd">
+              <span class="pop-ytd-label">YTD Perf:</span>
+              <span class="pop-ytd-value ${clsForValue(Number(String(r.perf_ytd ?? '0').replace('%', '')))}">
+                ${escapeHtml(String(r.perf_ytd ?? '—'))}
+              </span>
+            </div>
+          </div>
+
+          <div class="pop-row-metrics">
+            <div class="pop-metric">
+              <span class="pop-metric-k">Market Cap</span>
+              <span class="pop-metric-v">${escapeHtml(r.market_cap ?? '—')}</span>
+            </div>
+            <div class="pop-metric">
+              <span class="pop-metric-k">Volume</span>
+              <span class="pop-metric-v">${escapeHtml(r.volume ?? '—')}</span>
+            </div>
+            <div class="pop-metric">
+              <span class="pop-metric-k">Price</span>
+              <span class="pop-metric-v">${escapeHtml(r.price ?? '—')}</span>
+            </div>
+
+            <div class="pop-metric">
+              <span class="pop-metric-k">Change</span>
+              <span class="pop-metric-v ${clsForValue(Number(String(r.change ?? '0').replace('%', '').replace('+', '')))}">${escapeHtml(r.change ?? '—')}</span>
+            </div>
+            <div class="pop-metric">
+              <span class="pop-metric-k">Short Float</span>
+              <span class="pop-metric-v">${escapeHtml(r.short_ratio ?? '—')}</span>
+            </div>
+            <div class="pop-metric">
+              <span class="pop-metric-k">ATR</span>
+              <span class="pop-metric-v">
+                ${(() => {
+        const atr = Number(String(r.atr ?? '').replace(/,/g, ''));
+        const price = Number(String(r.price ?? '').replace(/,/g, ''));
+        return atr && price ? `${((atr / price) * 100).toFixed(2)}%` : '—';
+      })()}
+              </span>
+            </div>
+            <div class="pop-metric">
+              <span class="pop-metric-k">52W High</span>
+              <span class="pop-metric-v">${escapeHtml(r.high_52w ?? '—')}</span>
+            </div>
+            <div class="pop-metric pop-metric-wide">
+              <span class="pop-metric-k">Related</span>
+              <span class="pop-metric-v">
+                ${Array.isArray(r.related_ranked) && r.related_ranked.length
+        ? escapeHtml(
+          r.related_ranked
+            .slice(0, 8)
+            .map(x => x.reciprocal ? `${x.ticker}★` : x.ticker)
+            .join(', ')
+        )
+        : '—'}
+              </span>
+            </div>
+          </div>
+        </div>
+      `).join('') : '<div class="pop-loading">No matching stocks found.</div>'}
+    </div>
+  `;
+    const copyBtn = pop.querySelector('.pop-copy-icon');
+    if (copyBtn) {
+      copyBtn.addEventListener('pointerdown', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const text = copyBtn.dataset.copy || '';
+        const ok = await copyTextToClipboard(text);
+
+        if (ok) {
+          copyBtn.classList.add('is-copied');
+          setTimeout(() => copyBtn.classList.remove('is-copied'), 1200);
+        }
+      });
+    }
+
+    return pop;
+  }
+
+  async function copyTextToClipboard(text) {
+
+    if (!text || !String(text).trim()) {
+      console.warn('[copy] empty text, aborting');
+      return false;
+    }
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } else {
+        console.warn('[copy] Clipboard API unavailable, using fallback');
+      }
+    } catch (err) {
+      console.error('[copy] Clipboard API failed:', err);
+    }
+
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+
+      const ok = document.execCommand('copy');
+
+      document.body.removeChild(ta);
+      return ok;
+    } catch (err) {
+      console.error('[copy] execCommand fallback failed:', err);
+      return false;
+    }
+  }
+
+  function bindCardHoverPopups() {
+    document.querySelectorAll('.group-card').forEach(card => {
+      const pop = card.querySelector('.group-hover-pop');
+      if (!pop) return;
+
+      const open = () => {
+        card.classList.add('is-open');
+        loadTopPerformers(card);
+      };
+
+      const close = () => {
+        card.classList.remove('is-open');
+      };
+
+      card.addEventListener('mouseenter', open);
+      card.addEventListener('focusin', open);
+
+      card.addEventListener('mouseleave', (e) => {
+        if (pop.contains(e.relatedTarget)) return;
+        close();
+      });
+
+      pop.addEventListener('mouseenter', () => {
+        card.classList.add('is-open');
+      });
+
+      pop.addEventListener('mouseleave', (e) => {
+        if (card.contains(e.relatedTarget)) return;
+        close();
+      });
+
+      card.addEventListener('focusout', (e) => {
+        if (card.contains(e.relatedTarget) || pop.contains(e.relatedTarget)) return;
+        close();
+      });
+    });
+  }
+
+  refreshButton.addEventListener('click', () => window.location.reload());
+  renderCards();
+}) ();
+
+</script>
+
+{% endblock %}
