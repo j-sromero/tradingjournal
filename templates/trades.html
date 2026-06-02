@@ -141,7 +141,7 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="15" style="text-align:center;padding:2rem;">{% if v3_mode %}No v3 trades yet. Import from v3 importer first.{% else %}No trades yet. <a href="{{ url_for('new_trade') }}">Add your first one →</a>{% endif %}</td></tr>
+    <tr><td colspan="15" style="text-align:center;padding:2rem;">{% if v3_mode %}No v3 trades yet. Import from v3 importer first.{% else %}No trades yet.{% endif %}</td></tr>
   {% endfor %}
   </tbody>
   {% endif %}

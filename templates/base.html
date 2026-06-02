@@ -44,33 +44,6 @@
     {% block content %}{% endblock %}
   </main>
 
-  <!-- Quick Add Modal -->
-  <div id="modal" class="modal hidden">
-    <div class="modal-content card">
-      <button class="modal-close" id="modal-close">×</button>
-      <h2>⚡ Quick Add Trade</h2>
-      <form method="post" action="{{ url_for('new_trade') }}" enctype="multipart/form-data">
-        <input type="hidden" name="from_modal" value="1">
-        <div class="grid">
-          <label>Ticker *<input name="ticker" required></label>
-          <label>Direction *
-            <select name="direction">
-              <option value="long">Long</option>
-              <option value="short">Short</option>
-            </select>
-          </label>
-          <label>Entry date *<input type="datetime-local" name="entry_date" required></label>
-          <label>Entry price *<input type="number" step="any" name="entry_price" required></label>
-          <label>Size *<input type="number" step="any" name="size" required></label>
-          <label>Stop<input type="number" step="any" name="stop_loss"></label>
-          <label>Setup<input name="setup"></label>
-          <label>Tags<input name="tags"></label>
-        </div>
-        <button class="btn primary">Save</button>
-      </form>
-    </div>
-  </div>
-
   <div class="shortcut-hint">
     Press <kbd>?</kbd> for shortcuts
   </div>
