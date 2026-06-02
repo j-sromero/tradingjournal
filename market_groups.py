@@ -7,11 +7,14 @@ import requests
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 import time
+import random
 import pandas as pd
 
 _FINVIZ_STOCK_URL = "https://finviz.com/stock"
+_FINVIZ_QUOTE_URL = "https://finviz.com/quote.ashx"
 _RELATIONS_CACHE = {}
 _RELATIONS_TTL = 1800
+_RELATIONS_STALE_TTL = 86400
 
 _TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,8}$")
 _FINVIZ_HEADERS = {
@@ -29,152 +32,318 @@ _MARKET_GROUPS_TOP10_TTL = 300
 _FINVIZ_SCREENER_URL = (
     "https://finviz.com/screener"
     "?v=151&p=d"
-    "&f=ind_{industry},sh_avgvol_o500,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d"
+    "&f=ind_{industry},sh_avgvol_o1000,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d"
     "&ft=4&o=-perfytd"
     "&c=0,1,2,4,6,67,65,66,31,49,57,47"
 )
 
-def parse_group_from_href(raw_html, label):
-    pattern = rf'>{label}</a>:(.*?)(?:\|&nbsp;|\|\s*<a|</div>)'
+def parse_group_from_href(raw_html, label, debug=False):
+    pattern = rf">{label}</a>\s*:(.*?)(?:\|&nbsp;|\|\s*<a|</div>|</td>)"
     m = re.search(pattern, raw_html, re.I | re.S)
+
+    #if debug:
+    #    print(f"[parse_group_from_href] label={label!r} matched={bool(m)}")
+
     if not m:
+        if debug:
+            idx = raw_html.lower().find(label.lower())
+            if idx != -1:
+                start = max(0, idx - 250)
+                end = min(len(raw_html), idx + 500)
+                print(f"[parse_group_from_href] nearby html for {label}:")
+                print(raw_html[start:end])
+            else:
+                print(f"[parse_group_from_href] label text not found: {label}")
         return []
+
     chunk = m.group(1)
-    tickers = re.findall(r'stock\?t=([A-Z.\-]+)', chunk)
+
+    if debug:
+        print(f"[parse_group_from_href] chunk preview for {label}:")
+        print(chunk[:1000])
+
+    tickers = re.findall(r"(?:stock\?t=|quote\.ashx\?t=)([A-Z.\-]+)", chunk, re.I)
+
+    # Fallback: Finviz can change this section markup. If the scoped chunk yields
+    # nothing, inspect a nearby window around the label location.
+    if not tickers:
+        idx = raw_html.lower().find(label.lower())
+        if idx != -1:
+            start = max(0, idx - 200)
+            end = min(len(raw_html), idx + 2500)
+            window = raw_html[start:end]
+            tickers = re.findall(r"(?:stock\?t=|quote\.ashx\?t=)([A-Z.\-]+)", window, re.I)
+
     out = []
     for t in tickers:
         t = t.upper()
         if t not in out:
             out.append(t)
+
+    if debug:
+        print(f"[parse_group_from_href] deduped tickers for {label}: {out}")
+
     return out
 
-def fetch_finviz_relations(ticker):
+def fetch_finviz_relations(ticker, debug=False):
     t = (ticker or "").upper().strip()
     if not t:
-        return {"peers": [], "held_by_etfs": []}
+        return {
+            "peers": [],
+            "held_by_etfs": [],
+            "ok": False,
+            "source": "empty_ticker",
+            "error": "empty ticker",
+        }
 
     now = time.time()
     cached = _RELATIONS_CACHE.get(t)
     if cached and now - cached[0] < _RELATIONS_TTL:
         return cached[1]
 
-    resp = requests.get(_FINVIZ_STOCK_URL, params={"t": t, "p": "d"}, headers=_FINVIZ_HEADERS, timeout=30)
-    resp.raise_for_status()
-    raw_html = resp.text
-    soup = BeautifulSoup(raw_html, "html.parser")
+    def _request_with_backoff(url, params):
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    url,
+                    params=params,
+                    headers=_FINVIZ_HEADERS,
+                    timeout=30,
+                )
 
-    peers = []
-    held_by = []
+                # Handle transient throttling/server issues with short backoff.
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    last_err = requests.exceptions.HTTPError(
+                        f"{resp.status_code} from {resp.url}", response=resp
+                    )
+                    if attempt < 2:
+                        time.sleep((0.7 * (attempt + 1)) + random.uniform(0.2, 0.6))
+                        continue
+                    resp.raise_for_status()
 
-    peer_tickers = parse_group_from_href(raw_html, "Peers")
-    held_tickers = parse_group_from_href(raw_html, "Held by")
+                resp.raise_for_status()
+                return resp.text
+            except requests.exceptions.RequestException as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep((0.7 * (attempt + 1)) + random.uniform(0.2, 0.6))
+                    continue
+                raise
 
-    if peer_tickers:
+        if last_err:
+            raise last_err
+        raise RuntimeError("unexpected Finviz request failure")
+
+    try:
+        try:
+            raw_html = _request_with_backoff(_FINVIZ_STOCK_URL, {"t": t, "p": "d"})
+        except requests.exceptions.RequestException:
+            # Finviz sometimes serves one endpoint but throttles the other.
+            raw_html = _request_with_backoff(_FINVIZ_QUOTE_URL, {"t": t, "p": "d"})
+
+        peer_tickers = parse_group_from_href(raw_html, "Peers", debug=debug)
+        held_tickers = parse_group_from_href(raw_html, "Held by", debug=debug)
+
+        peers = []
+        held_by = []
+
         for pt in peer_tickers:
             if pt != t and pt not in peers:
                 peers.append(pt)
 
-    if held_tickers:
         for etf in held_tickers:
             if etf not in held_by:
                 held_by.append(etf)
 
-    if not peers and not held_by:
-        all_tickers = []
-        for span in soup.select("span[data-boxover-ticker]"):
-            pt = (span.get("data-boxover-ticker") or "").upper().strip()
-            if pt and pt != t and pt not in all_tickers:
-                all_tickers.append(pt)
-        for sym in all_tickers:
-            if sym in ETF_HINTS:
-                held_by.append(sym)
-            else:
-                peers.append(sym)
+        payload = {
+            "peers": peers,
+            "held_by_etfs": held_by,
+            "ok": True,
+            "source": "href_groups",
+            "error": None,
+        }
 
-    payload = {
-        "peers": peers,
-        "held_by_etfs": held_by,
-    }
-    _RELATIONS_CACHE[t] = (now, payload)
-    return payload
+        if debug:
+            print(f"[fetch_finviz_relations] ticker={t} peers={peers} held_by={held_by}")
 
-def build_reciprocal_peer_rankings(tickers):
-    tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
-    tickers = list(dict.fromkeys(tickers))
-    peer_map = {}
+        _RELATIONS_CACHE[t] = (now, payload)
+        return payload
 
-    for t in tickers:
-        try:
-            peer_map[t] = set(fetch_finviz_relations(t).get("peers", []))
-        except Exception:
-            peer_map[t] = set()
+    except requests.exceptions.RequestException as e:
+        # If live fetch fails, return stale cache when available instead of empty peers.
+        if cached and now - cached[0] < _RELATIONS_STALE_TTL:
+            stale = dict(cached[1])
+            stale["source"] = f"{stale.get('source')}_stale_cache"
+            stale["error"] = f"live_fetch_failed: {e}"
+            return stale
 
-    candidate_pool = set(tickers)
-    for peers in peer_map.values():
-        candidate_pool.update(peers)
+        payload = {
+            "peers": [],
+            "held_by_etfs": [],
+            "ok": False,
+            "source": "request_error",
+            "error": str(e),
+        }
+        _RELATIONS_CACHE[t] = (now, payload)
+        return payload
 
-    scored_map = {}
-    reciprocal_map = {}
+    except Exception as e:
+        payload = {
+            "peers": [],
+            "held_by_etfs": [],
+            "ok": False,
+            "source": "parse_error",
+            "error": str(e),
+        }
+        _RELATIONS_CACHE[t] = (now, payload)
+        return payload
 
-    for a in tickers:
-        a_peers = peer_map.get(a, set())
-        scored = []
+# def build_reciprocal_peer_rankings(tickers):
+#     tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
+#     tickers = list(dict.fromkeys(tickers))
 
-        for b in candidate_pool:
-            if b == a:
-                continue
+#     peer_map = {}
+#     peer_meta = {}
 
-            b_peers = peer_map.get(b)
-            if b_peers is None and b in a_peers:
-                try:
-                    b_peers = set(fetch_finviz_relations(b).get("peers", []))
-                except Exception:
-                    b_peers = set()
-                peer_map[b] = b_peers
+#     print(fetch_finviz_relations("AAOI", debug=True))
+#     print(fetch_finviz_relations("CIEN", debug=True))
+#     print(fetch_finviz_relations("LITE", debug=True))
+#     print(fetch_finviz_relations("VIAV", debug=True))
 
-            b_peers = b_peers or set()
+#     for t in tickers:
+#         rel = fetch_finviz_relations(t)
+#         peer_map[t] = set(rel.get("peers", []))
+#         peer_meta[t] = {
+#             "ok": rel.get("ok", True),
+#             "source": rel.get("source"),
+#             "error": rel.get("error"),
+#         }
 
-            a_to_b = b in a_peers
-            b_to_a = a in b_peers
-            shared = len(a_peers.intersection(b_peers))
+#     candidate_pool = set(tickers)
+#     for peers in peer_map.values():
+#         candidate_pool.update(peers)
 
-            score = 0.0
-            if a_to_b and b_to_a:
-                score += 3.0
-            elif a_to_b or b_to_a:
-                score += 1.0
+#     from collections import Counter
+#     cohort_frequency = Counter()
+#     for t in tickers:
+#         for p in peer_map.get(t, set()):
+#             cohort_frequency[p] += 1
 
-            score += 0.25 * shared
+#     scored_map = {}
+#     reciprocal_map = {}
 
-            if score <= 0:
-                continue
+#     for a in tickers:
+#         a_peers = peer_map.get(a, set())
+#         scored = []
 
-            scored.append({
-                "ticker": b,
-                "score": round(score, 2),
-                "reciprocal": bool(a_to_b and b_to_a),
-                "shared_count": shared,
-                "a_to_b": bool(a_to_b),
-                "b_to_a": bool(b_to_a),
-            })
+#         for b in candidate_pool:
+#             if b == a:
+#                 continue
 
-        scored.sort(
-            key=lambda x: (
-                -x["score"],
-                not x["reciprocal"],
-                -x["shared_count"],
-                x["ticker"],
-            )
-        )
+#             if b not in peer_map:
+#                 rel = fetch_finviz_relations(b)
+#                 peer_map[b] = set(rel.get("peers", []))
+#                 peer_meta[b] = {
+#                     "ok": rel.get("ok", True),
+#                     "source": rel.get("source"),
+#                     "error": rel.get("error"),
+#                 }
 
-        scored_map[a] = scored[:10]
-        reciprocal_map[a] = [x["ticker"] for x in scored if x["reciprocal"]][:8]
+#             b_peers = peer_map.get(b) or set()
 
-    return {
-        "peer_map": {k: sorted(v) for k, v in peer_map.items()},
-        "scored_map": scored_map,
-        "reciprocal_map": reciprocal_map,
-    }
+#             a_to_b = b in a_peers
+#             b_to_a = a in b_peers
+
+#             shared_peers = a_peers.intersection(b_peers)
+#             shared = len(shared_peers)
+#             union = len(a_peers.union(b_peers))
+#             jaccard = (shared / union) if union else 0.0
+#             overlap = (shared / min(len(a_peers), len(b_peers))) if a_peers and b_peers else 0.0
+
+#             freq = cohort_frequency.get(b, 0)
+
+#             supporter_count = 0
+#             for p in a_peers:
+#                 if p not in peer_map:
+#                     rel = fetch_finviz_relations(p)
+#                     peer_map[p] = set(rel.get("peers", []))
+#                     peer_meta[p] = {
+#                         "ok": rel.get("ok", True),
+#                         "source": rel.get("source"),
+#                         "error": rel.get("error"),
+#                     }
+
+#                 p_peers = peer_map.get(p) or set()
+#                 if b in p_peers:
+#                     supporter_count += 1
+
+#             score = 0.0
+
+#             if a_to_b and b_to_a:
+#                 score += 3.0
+#             elif a_to_b or b_to_a:
+#                 score += 1.25
+
+#             score += 0.60 * shared
+#             score += 3.00 * jaccard
+#             score += 0.75 * max(0, freq - 1)
+#             score += 0.35 * supporter_count
+
+#             if score <= 0:
+#                 continue
+
+#             reciprocal = bool(a_to_b and b_to_a)
+
+#             confirmed = bool(
+#                 reciprocal
+#                 or (freq >= 2 and shared >= 2)
+#                 or (freq >= 2 and overlap >= 0.35)
+#                 or (shared >= 3)
+#                 or (supporter_count >= 2)
+#             )
+
+#             scored.append({
+#                 "ticker": b,
+#                 "score": round(score, 3),
+#                 "reciprocal": reciprocal,
+#                 "confirmed": confirmed,
+#                 "shared_count": shared,
+#                 "jaccard": round(jaccard, 3),
+#                 "overlap": round(overlap, 3),
+#                 "cohort_frequency": freq,
+#                 "supporter_count": supporter_count,
+#                 "a_to_b": bool(a_to_b),
+#                 "b_to_a": bool(b_to_a),
+#                 "shared_peers": sorted(shared_peers)[:12],
+#                 "peer_ok": peer_meta.get(b, {}).get("ok", True),
+#                 "peer_source": peer_meta.get(b, {}).get("source"),
+#                 "peer_error": peer_meta.get(b, {}).get("error"),
+#             })
+
+#         scored.sort(
+#             key=lambda x: (
+#                 -x["score"],
+#                 -x["cohort_frequency"],
+#                 -x["supporter_count"],
+#                 not x["reciprocal"],
+#                 -x["overlap"],
+#                 -x["jaccard"],
+#                 -x["shared_count"],
+#                 x["ticker"],
+#             )
+#         )
+
+#         scored_map[a] = scored[:10]
+#         reciprocal_map[a] = [x["ticker"] for x in scored if x["reciprocal"]][:8]
+
+#     return {
+#         "peer_map": {k: sorted(v) for k, v in peer_map.items()},
+#         "peer_meta": peer_meta,
+#         "scored_map": scored_map,
+#         "reciprocal_map": reciprocal_map,
+#         "cohort_frequency": dict(cohort_frequency),
+#     }
 
 
 def fetch_finviz_groups_data(url="https://finviz.com/groups?g=industry&v=210&o=name"):
@@ -196,8 +365,8 @@ def fetch_finviz_groups_data(url="https://finviz.com/groups?g=industry&v=210&o=n
             'ticker_slug': html.unescape(item.get('ticker', '')),
             'label': html.unescape(item.get('label', '')).replace('\u0026', '&'),
             'screener_url': html.unescape(item.get('screenerUrl', '')).replace('\u0026', '&'),
-            '1d': float(item.get('perfT', 0) or 0),
             '1w': float(item.get('perfW', 0) or 0),
+            '1d': float(item.get('perfT', 0) or 0),
             '1m': float(item.get('perfM', 0) or 0),
             '3m': float(item.get('perfQ', 0) or 0),
             '6m': float(item.get('perfH', 0) or 0),
@@ -326,17 +495,26 @@ def fetch_market_group_top10(industry_slug):
     parsed_rows = parsed_rows[:10]
 
     tickers = [r["ticker"] for r in parsed_rows]
-    graph = build_reciprocal_peer_rankings(tickers)
-    scored_map = graph["scored_map"]
-    reciprocal_map = graph["reciprocal_map"]
-    raw_peer_map = graph["peer_map"]
 
+    # Populate per-row peers so the popup can display "Related" tickers and build
+    # grouped peer clusters in the frontend.
     for row in parsed_rows:
-        t = row["ticker"]
-        row["peers"] = raw_peer_map.get(t, [])
-        row["reciprocal_peers"] = reciprocal_map.get(t, [])
-        row["related_ranked"] = scored_map.get(t, [])
-        row["theme_related"] = [x["ticker"] for x in scored_map.get(t, [])[:8]]
+        t = row.get("ticker")
+        rel = fetch_finviz_relations(t)
+        row["peers"] = rel.get("peers", []) if rel.get("ok") else []
+        row["peers_source"] = rel.get("source")
+        row["peers_error"] = rel.get("error")
+    #graph = build_reciprocal_peer_rankings(tickers)
+    #scored_map = graph["scored_map"]
+    #reciprocal_map = graph["reciprocal_map"]
+    #raw_peer_map = graph["peer_map"]
+
+    #for row in parsed_rows:
+    #    t = row["ticker"]
+    #    row["peers"] = raw_peer_map.get(t, [])
+    #    row["reciprocal_peers"] = reciprocal_map.get(t, [])
+    #    row["related_ranked"] = scored_map.get(t, [])
+    #    row["theme_related"] = [x["ticker"] for x in scored_map.get(t, [])[:8]]
 
     payload = {
         "industry": industry,

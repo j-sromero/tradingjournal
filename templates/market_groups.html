@@ -26,6 +26,11 @@
     </div>
 
     <div class="market-toolbar-right">
+      <div class="ticker-lookup">
+        <input id="ticker-lookup-input" class="search-input" type="search" placeholder="Lookup ticker… e.g. NVDA"
+          autocomplete="off" spellcheck="false" />
+        <button id="ticker-lookup-btn" class="pill" type="button">Go</button>
+      </div>
       <input id="group-search" class="search-input" type="search" placeholder="Filter industries…" autocomplete="off" />
       <label class="toggle-inline">
         <input type="checkbox" id="show-all-metrics" />
@@ -56,7 +61,7 @@
       <div class="summary-value" id="breadth-value">—</div>
     </article>
   </div>
-
+  <div id="ticker-lookup-result"></div>
   <div class="groups-grid" id="groups-grid"></div>
 </section>
 
@@ -538,7 +543,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding-right: 44px; 
+    padding-right: 44px;
   }
 
   .pop-titlewrap {
@@ -575,15 +580,15 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid rgba(255,255,255,.10);
+    border: 1px solid rgba(255, 255, 255, .10);
     border-radius: 8px;
-    background: rgba(255,255,255,.04);
+    background: rgba(255, 255, 255, .04);
     color: #cbd5e1;
     pointer-events: auto;
   }
 
   .pop-copy-icon:hover {
-    background: rgba(255,255,255,.08);
+    background: rgba(255, 255, 255, .08);
     color: #fff;
   }
 
@@ -595,13 +600,126 @@
 
   .pop-copy-icon.is-copied {
     color: #10b981;
-    border-color: rgba(16,185,129,.32);
-    background: rgba(16,185,129,.08);
+    border-color: rgba(16, 185, 129, .32);
+    background: rgba(16, 185, 129, .08);
+  }
+
+  #ticker-lookup-result:empty {
+    display: none;
+  }
+
+  .ticker-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(2, 6, 23, 0.66);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 0;
+    overflow-y: auto;
+  }
+
+  .ticker-modal {
+    width: 100vw;
+    max-width: 100vw;
+    min-height: 100vh;
+    max-height: none;
+    display: grid;
+    grid-template-rows: auto auto auto;
+    background: #0f172a;
+    border: 1px solid rgba(148, 163, 184, .18);
+    border-radius: 0;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+    overflow: hidden;
+  }
+
+  .ticker-modal-header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 18px 12px;
+    border-bottom: 1px solid rgba(148, 163, 184, .12);
+  }
+
+  .ticker-modal-close {
+    border: 1px solid rgba(148, 163, 184, .16);
+    background: rgba(255, 255, 255, .04);
+    color: #cbd5e1;
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+
+  .ticker-modal-mainchart {
+    height: 500px;
+    margin: 0 18px 14px;
+    background: #131722;
+    border: 1px solid #1e222d;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .ticker-modal-body {
+    overflow: visible;
+    padding: 0 18px 18px;
+  }
+
+  .ticker-peer-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .ticker-peer-card {
+    border: 1px solid rgba(148, 163, 184, .12);
+    border-radius: 14px;
+    padding: 14px;
+    background: rgba(255, 255, 255, .04);
+  }
+
+  .ticker-peer-chart {
+    height: 200px;
+    width: 100%;
+    margin-top: 10px;
+    background: #131722;
+    border: 1px solid #1e222d;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  @media (max-width: 900px) {
+    .ticker-modal-mainchart {
+      height: 200px;
+    }
+
+    .ticker-peer-chart {
+      height: 200px;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .ticker-modal-backdrop {
+      padding: 0;
+    }
+
+    .ticker-modal {
+      width: 100vw;
+      max-height: none;
+    }
+
+    .ticker-peer-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <script>
   (() => {
     const initialData = {{ groups_data| tojson
@@ -614,7 +732,7 @@
   const grid = document.getElementById('groups-grid');
   const pills = document.querySelectorAll('.pill');
   pills.forEach(pill => {
-    pill.classList.toggle('active', pill.dataset.metric === currentKey);
+    pill.classList.toggle('is-active', pill.dataset.key === currentKey);
   });
   const searchInput = document.getElementById('group-search');
   const showAllCheckbox = document.getElementById('show-all-metrics');
@@ -626,6 +744,9 @@
   const laggardValue = document.getElementById('laggard-value');
   const medianValue = document.getElementById('median-value');
   const breadthValue = document.getElementById('breadth-value');
+  const tickerLookupInput = document.getElementById('ticker-lookup-input');
+  const tickerLookupBtn = document.getElementById('ticker-lookup-btn');
+  const resultEl = document.getElementById('ticker-lookup-result');
 
   function clsForValue(v) {
     if (v > 0) return 'positive';
@@ -635,7 +756,7 @@
 
   function syncActivePill() {
     pills.forEach(pill => {
-      pill.classList.toggle('active', pill.dataset.metric === currentKey);
+      pill.classList.toggle('is-active', pill.dataset.key === currentKey);
     });
   }
 
@@ -698,9 +819,8 @@
       const label = String(row?.label ?? 'Unknown industry');
       const tickerSlug = String(row?.ticker_slug ?? '');
       const screenerPath = String(row?.screener_url ?? '');
-      const screenerHref = tickerSlug ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},
-                                         sh_avgvol_o500,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&
-                                         o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
+      const screenerHref = tickerSlug
+        ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},sh_avgvol_o1000,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
         : 'https://finviz.com/groups.ashx';
       const mainValue = Number(row?.[currentKey]);
 
@@ -779,6 +899,281 @@
       .replace(/'/g, '&#39;');
   }
 
+  function buildMiniChart(el, payload, options = {}) {
+    if (!el || !window.LightweightCharts) return;
+
+    const compact = Boolean(options.compact);
+    const showGrid = Boolean(options.showGrid);
+    const candles = Array.isArray(payload?.candles) ? payload.candles : [];
+    const price = Array.isArray(payload?.price) ? payload.price : [];
+    const fallbackLine = candles.map(c => ({ time: c.time, value: c.close }));
+    const lineData = fallbackLine.length ? fallbackLine : price;
+
+    if (!candles.length && !lineData.length) return;
+
+    const chart = LightweightCharts.createChart(el, {
+      width: el.clientWidth,
+      height: el.clientHeight || (compact ? 68 : 128),
+      layout: {
+        background: { color: '#131722' },
+        textColor: '#d1d4dc',
+      },
+      grid: {
+        vertLines: { color: '#1e222d', visible: !compact || showGrid },
+        horzLines: { color: '#1e222d', visible: !compact || showGrid },
+      },
+      crosshair: {
+        mode: LightweightCharts.CrosshairMode?.Normal,
+        vertLine: { visible: !compact },
+        horzLine: { visible: !compact },
+      },
+      rightPriceScale: {
+        visible: !compact,
+        borderColor: '#363a45',
+        autoScale: true,
+        scaleMargins: { top: 0.03, bottom: 0.03 },
+      },
+      leftPriceScale: { visible: false, borderVisible: false },
+      timeScale: {
+        visible: !compact,
+        borderColor: '#363a45',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      handleScroll: false,
+      handleScale: false,
+    });
+
+    const logMode = LightweightCharts?.PriceScaleMode?.Logarithmic;
+    if (logMode !== undefined) {
+      chart.priceScale('right').applyOptions({ mode: logMode });
+    }
+
+    if (candles.length) {
+      const candleOptions = {
+        upColor: '#26a69a',
+        downColor: '#ef5350',
+        borderUpColor: '#26a69a',
+        borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a',
+        wickDownColor: '#ef5350',
+        priceLineVisible: false,
+        lastValueVisible: false,
+      };
+
+      if (typeof chart.addSeries === 'function' && LightweightCharts.CandlestickSeries) {
+        const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, candleOptions);
+        candleSeries.setData(candles);
+      } else if (typeof chart.addCandlestickSeries === 'function') {
+        const candleSeries = chart.addCandlestickSeries(candleOptions);
+        candleSeries.setData(candles);
+      }
+    }
+
+    if (lineData.length) {
+      const lineOptions = {
+        color: '#94a3b8',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle?.Dotted,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      };
+
+      if (typeof chart.addSeries === 'function' && LightweightCharts.LineSeries) {
+        const lineSeries = chart.addSeries(LightweightCharts.LineSeries, lineOptions);
+        lineSeries.setData(lineData);
+      } else if (typeof chart.addLineSeries === 'function') {
+        const lineSeries = chart.addLineSeries(lineOptions);
+        lineSeries.setData(lineData);
+      }
+    }
+
+    chart.timeScale().fitContent();
+
+    const ro = new ResizeObserver(() => {
+      chart.applyOptions({
+        width: el.clientWidth,
+        height: el.clientHeight || (compact ? 68 : 128),
+      });
+    });
+    ro.observe(el);
+
+    return { chart, ro };
+  }
+
+  async function runTickerLookup() {
+    const ticker = tickerLookupInput.value.trim().toUpperCase();
+    if (!ticker || !resultEl) return;
+
+    console.log('[lookup] start', { ticker });
+    resultEl.innerHTML = `<div class="ticker-pill">Loading ${escapeHtml(ticker)}…</div>`;
+
+    try {
+      console.log('[lookup] fetching relations...');
+      const res = await fetch(`/api/stock-relations?t=${encodeURIComponent(ticker)}&debug=1`);
+      console.log('[lookup] relations response', res.status, res.ok);
+
+      const raw = await res.text();
+      console.log('[lookup] relations raw text', raw.slice(0, 500));
+
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (err) {
+        console.error('[lookup] relations JSON parse failed', err);
+        resultEl.innerHTML = `<div class="ticker-pill">Relations JSON parse failed. Check console.</div>`;
+        return;
+      }
+
+      console.log('[lookup] relations parsed', data);
+
+      if (!res.ok || !data.ok) {
+        resultEl.innerHTML = `<div class="ticker-pill">Lookup failed: ${escapeHtml(data?.error || `HTTP ${res.status}`)}</div>`;
+        return;
+      }
+
+      const peerRows = (data.peers || []).slice(0, 6).map(t => ({
+        ticker: t,
+        company: ''
+      }));
+
+      console.log('[lookup] peers', peerRows);
+      console.log('[lookup] finviz parsed peers before yfinance', data?.debug?.finviz_parsed_peers || data.peers || []);
+
+      resultEl.innerHTML = `
+        <div class="ticker-modal-backdrop" data-close-lookup>
+          <section
+            class="ticker-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ticker-modal-title"
+            onclick="event.stopPropagation()"
+          >
+            <div class="ticker-modal-header">
+              <div class="ticker-pill-meta">
+                <div class="ticker-pill-symbol" id="ticker-modal-title">${escapeHtml(data.ticker)}</div>
+                <div class="ticker-pill-company">${escapeHtml(data.company || '—')}</div>
+                <div class="ticker-pill-tags">
+                  <span>${escapeHtml(data.sector || '—')}</span>
+                  <span>•</span>
+                  <span>${escapeHtml(data.industry || '—')}</span>
+                </div>
+              </div>
+              <button class="ticker-modal-close" type="button" aria-label="Close">✕</button>
+            </div>
+
+            <div class="ticker-modal-mainchart" id="lookup-chart-main"></div>
+
+            <div class="ticker-modal-body">
+              ${peerRows.length ? `
+                <div class="ticker-peer-grid">
+                  ${peerRows.map(peer => `
+                    <article class="ticker-peer-card">
+                      <div class="ticker-peer-top">
+                        <div class="ticker-peer-symbol">${escapeHtml(peer.ticker)}</div>
+                        <div class="ticker-peer-name">${escapeHtml(peer.company || '—')}</div>
+                      </div>
+                      <div class="ticker-peer-chart" id="peer-chart-${peer.ticker}"></div>
+                    </article>
+                  `).join('')}
+                </div>
+              ` : `
+                <div class="empty-state-inline">No related peers found for ${escapeHtml(data.ticker)}.</div>
+              `}
+            </div>
+          </section>
+        </div>
+      `;
+      const backdrop = resultEl.querySelector('.ticker-modal-backdrop');
+      const closeBtn = resultEl.querySelector('.ticker-modal-close');
+
+      function closeLookupModal() {
+        resultEl.innerHTML = '';
+      }
+
+      backdrop?.addEventListener('click', (e) => {
+        if (e.target.matches('[data-close-lookup]')) closeLookupModal();
+      });
+
+      closeBtn?.addEventListener('click', closeLookupModal);
+
+      const onEscape = (e) => {
+        if (e.key === 'Escape') {
+          closeLookupModal();
+          document.removeEventListener('keydown', onEscape);
+        }
+      };
+      document.addEventListener('keydown', onEscape);
+      console.log('[lookup] HTML rendered');
+
+      console.log('[lookup] fetching main price series...');
+      const mainSeries = await fetchPriceSeries(data.ticker, '1d');
+      console.log('[lookup] main candles/price points', mainSeries.candles.length, mainSeries.price.length);
+
+      buildMiniChart(
+        document.getElementById('lookup-chart-main'),
+        mainSeries,
+        { compact: false }
+      );
+
+      await Promise.all(
+        peerRows.map(async (peer) => {
+          try {
+            console.log('[lookup] fetching peer', peer.ticker);
+            const peerSeries = await fetchPriceSeries(peer.ticker, '1d');
+            console.log('[lookup] peer series', peer.ticker, peerSeries.candles.length, peerSeries.price.length);
+
+            if (!peerSeries.candles.length && !peerSeries.price.length) return;
+
+            buildMiniChart(
+              document.getElementById(`peer-chart-${peer.ticker}`),
+              peerSeries,
+              { compact: true, showGrid: true }
+            );
+          } catch (err) {
+            console.error('[lookup] peer chart failed', peer.ticker, err);
+          }
+        })
+      );
+
+      console.log('[lookup] done');
+    } catch (err) {
+      console.error('[lookup] fatal error', err);
+      resultEl.innerHTML = `<div class="ticker-pill">Lookup crashed. Check console.</div>`;
+    }
+  }
+
+
+  async function fetchPriceSeries(symbol, interval = '1d') {
+    const res = await fetch(`/api/v3/ohlcv?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`);
+    if (!res.ok) {
+      throw new Error(`OHLCV request failed for ${symbol}`);
+    }
+
+    const json = await res.json();
+
+    const candles = (Array.isArray(json.candles) ? json.candles : [])
+      .map(c => ({
+        time: Number(c.time),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+      }))
+      .filter(c => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
+
+    const price = (Array.isArray(json.price) ? json.price : [])
+      .map(p => ({ time: Number(p.time), value: Number(p.value) }))
+      .filter(p => Number.isFinite(p.time) && Number.isFinite(p.value));
+
+    return { candles, price };
+  }
+
+  tickerLookupBtn?.addEventListener('click', runTickerLookup);
+  tickerLookupInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runTickerLookup();
+  });
+
   async function loadTopPerformers(card) {
     const industry = card.dataset.industry;
     const label = card.dataset.label || 'Industry';
@@ -821,14 +1216,128 @@
     return `https://finviz.com/${value.replace(/^\/+/, '')}`;
   }
 
+  function buildPeerGroups(rows) {
+    const counts = new Map();
+    const pairCounts = new Map();
+    const rowPeerLists = [];
+
+    for (const row of rows) {
+      const peers = Array.isArray(row?.peers) ? row.peers : [];
+      const deduped = [...new Set(
+        peers.map(x => String(x || "").trim().toUpperCase()).filter(Boolean)
+      )];
+
+      rowPeerLists.push(deduped);
+
+      for (const t of deduped) {
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+
+      for (let i = 0; i < deduped.length; i++) {
+        for (let j = i + 1; j < deduped.length; j++) {
+          const a = deduped[i];
+          const b = deduped[j];
+          const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+          pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+        }
+      }
+    }
+
+    const repeated = new Set(
+      [...counts.entries()]
+        .filter(([, n]) => n >= 2)
+        .map(([t]) => t)
+    );
+
+    if (!repeated.size) return [];
+
+    const adj = new Map();
+    for (const t of repeated) adj.set(t, new Set());
+
+    for (const [key, n] of pairCounts.entries()) {
+      const [a, b] = key.split("|");
+      if (!repeated.has(a) || !repeated.has(b)) continue;
+
+      const minFreq = Math.min(counts.get(a) || 0, counts.get(b) || 0);
+      const strength = minFreq ? n / minFreq : 0;
+
+      // stricter join rule: not just "ever together", but together often enough
+      if (n >= 2 && strength >= 0.6) {
+        adj.get(a).add(b);
+        adj.get(b).add(a);
+      }
+    }
+
+    const seen = new Set();
+    const groups = [];
+
+    for (const start of adj.keys()) {
+      if (seen.has(start)) continue;
+
+      const stack = [start];
+      const comp = [];
+
+      while (stack.length) {
+        const cur = stack.pop();
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        comp.push(cur);
+
+        for (const nxt of adj.get(cur) || []) {
+          if (!seen.has(nxt)) stack.push(nxt);
+        }
+      }
+
+      if (comp.length >= 2) {
+        comp.sort((a, b) => {
+          const ca = counts.get(a) || 0;
+          const cb = counts.get(b) || 0;
+          return cb - ca || a.localeCompare(b);
+        });
+        groups.push(comp);
+      }
+    }
+
+    groups.sort((a, b) => b.length - a.length || a[0].localeCompare(b[0]));
+    return groups;
+  }
+
+  function formatPeerGroupsForClipboard(rows) {
+    if (!Array.isArray(rows) || !rows.length) return "";
+
+    const seenTickers = new Set();
+    const lines = [];
+
+    for (const row of rows) {
+      const ticker = String(row?.ticker || '').trim().toUpperCase();
+      if (!ticker || seenTickers.has(ticker)) continue;
+      seenTickers.add(ticker);
+
+      const peers = [...new Set(
+        (Array.isArray(row?.peers) ? row.peers : [])
+          .map(peer => String(peer || '').trim().toUpperCase())
+          .filter(peer => peer && peer !== ticker)
+      )];
+
+      lines.push(`${ticker}: ${peers.length ? peers.join(', ') : '—'}`);
+    }
+
+    return lines.join("\n");
+  }
+
   function renderPopup(pop, label, screenerHref, data) {
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     const finalHref = normalizeFinvizUrl((data && data.url) || screenerHref);
-    const starredAcrossPopup = rows
-      .flatMap(r => (Array.isArray(r.related_ranked) ? r.related_ranked : [])
-        .filter(x => x.reciprocal)
-        .map(x => x.ticker))
-      .filter((t, i, arr) => arr.indexOf(t) === i);
+
+    const peerLines = rows
+      .map((r, i) => {
+        const peers = Array.isArray(r.peers) ? r.peers : [];
+        if (!peers.length) return "";
+        return `Group ${i + 1}: ${peers.join(", ")}`;
+      })
+      .filter(Boolean);
+
+    const groupedCopyText = formatPeerGroupsForClipboard(rows) || peerLines.join("\n");
 
     pop.innerHTML = `
     <div class="pop-titlebar">
@@ -839,9 +1348,8 @@
       <button
         class="pop-copy-icon"
         type="button"
-        aria-label="Copy starred peers"
-        title="Copy starred peers"
-        data-copy="${escapeHtml(starredAcrossPopup.join(', '))}"
+        aria-label="Copy peers"
+        title="Copy peers"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="10" height="10" rx="2"></rect>
@@ -903,13 +1411,8 @@
             <div class="pop-metric pop-metric-wide">
               <span class="pop-metric-k">Related</span>
               <span class="pop-metric-v">
-                ${Array.isArray(r.related_ranked) && r.related_ranked.length
-        ? escapeHtml(
-          r.related_ranked
-            .slice(0, 8)
-            .map(x => x.reciprocal ? `${x.ticker}★` : x.ticker)
-            .join(', ')
-        )
+                ${Array.isArray(r.peers) && r.peers.length
+        ? escapeHtml(r.peers.join(", "))
         : '—'}
               </span>
             </div>
@@ -918,14 +1421,14 @@
       `).join('') : '<div class="pop-loading">No matching stocks found.</div>'}
     </div>
   `;
+
     const copyBtn = pop.querySelector('.pop-copy-icon');
     if (copyBtn) {
       copyBtn.addEventListener('pointerdown', async (e) => {
         e.preventDefault();
         e.stopPropagation();
 
-        const text = copyBtn.dataset.copy || '';
-        const ok = await copyTextToClipboard(text);
+        const ok = await copyTextToClipboard(groupedCopyText);
 
         if (ok) {
           copyBtn.classList.add('is-copied');

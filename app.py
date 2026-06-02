@@ -21,7 +21,7 @@ from flask import (
 from werkzeug.utils import secure_filename
 import numpy as np
 import yfinance as yf
-from market_groups import fetch_finviz_groups_data, fetch_market_group_top10
+from market_groups import fetch_finviz_groups_data, fetch_market_group_top10, fetch_finviz_relations
 
 # ---------- Config ----------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -1281,6 +1281,44 @@ def api_market_groups_top10():
     except Exception as e:
         return jsonify({"rows": [], "url": None, "error": str(e)}), 500
     
+@app.route("/api/stock-relations")
+def api_stock_relations():
+    ticker = (request.args.get("t") or "").strip().upper()
+    if not ticker:
+        return jsonify({"ok": False, "error": "missing ticker"}), 400
+
+    debug = (request.args.get("debug") or "").strip().lower() in {"1", "true", "yes", "on"}
+    relations = fetch_finviz_relations(ticker, debug=debug)
+
+    peers = relations.get("peers") or []
+    held_by = relations.get("held_by_etfs") or []
+
+    if debug:
+        app.logger.info(
+            "[stock-relations] ticker=%s source=%s peers=%s held_by=%s error=%s",
+            ticker,
+            relations.get("source"),
+            peers,
+            held_by,
+            relations.get("error"),
+        )
+
+    return jsonify({
+        "ok": bool(relations.get("ok", False)),
+        "ticker": ticker,
+        "company": "",
+        "sector": "",
+        "industry": "",
+        "peers": peers,
+        "held_by_etfs": held_by,
+        "source": relations.get("source"),
+        "error": relations.get("error"),
+        "debug": {
+            "finviz_parsed_peers": peers,
+            "finviz_parsed_held_by": held_by,
+        } if debug else None,
+    })
+    
 # ---------- Routes: trades ----------
 @app.route("/trades")
 def trades_list():
@@ -2085,30 +2123,6 @@ def api_v3_ohlcv():
         db.commit()
     return tid
 
-@app.route("/trades/new", methods=["GET", "POST"])
-def new_trade():
-    if request.method == "POST":
-        _save_trade_from_form(request.form, request.files)
-        flash("Trade saved ✅", "success")
-        if request.form.get("from_modal"):
-            return redirect(url_for("dashboard"))
-        return redirect(url_for("trades_list"))
-    return render_template("new_trade.html", t=None, tags=all_tags(), setups=all_setups())
-
-@app.route("/trades/<int:tid>/edit", methods=["GET", "POST"])
-def edit_trade(tid):
-    db = get_db()
-    row = db.execute("SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%') AND id=?", (tid,)).fetchone()
-    if not row: abort(404)
-    if request.method == "POST":
-        _save_trade_from_form(request.form, request.files, trade_id=tid)
-        flash("Trade updated ✅", "success")
-        return redirect(url_for("trade_detail", tid=tid))
-    t = dict(row)
-    t["checklist_list"] = json.loads(t["checklist"]) if t.get("checklist") else []
-    tags = all_tags()
-    setups = all_setups()
-    return render_template("new_trade.html", t=t, tags=tags, setups=setups)
 
 @app.route("/trades/<int:tid>")
 def trade_detail(tid):
