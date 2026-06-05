@@ -657,20 +657,20 @@
     display: flex;
     justify-content: center;
     align-items: flex-start;
-    padding: 0;
+    padding: .75rem 1rem 1rem;
     overflow-y: auto;
   }
 
   .ticker-modal {
-    width: 100vw;
-    max-width: 100vw;
-    min-height: 100vh;
-    max-height: none;
+    width: min(1200px, 98vw);
+    max-width: 98vw;
+    min-height: 0;
+    max-height: 88vh;
     display: grid;
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto 1fr;
     background: #0f172a;
     border: 1px solid rgba(148, 163, 184, .18);
-    border-radius: 0;
+    border-radius: 14px;
     box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
     overflow: hidden;
   }
@@ -684,6 +684,50 @@
     border-bottom: 1px solid rgba(148, 163, 184, .12);
   }
 
+  .ticker-pill-meta {
+    min-width: 0;
+  }
+
+  .ticker-pill-tags {
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    flex-wrap: wrap;
+    opacity: .9;
+  }
+
+  .ticker-rank-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem;
+    margin-top: .5rem;
+  }
+
+  .ticker-rank-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    padding: .2rem .5rem;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, .22);
+    background: rgba(148, 163, 184, .10);
+    font-size: .76rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .ticker-rank-k {
+    color: #94a3b8;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+
+  .ticker-rank-v {
+    font-weight: 700;
+    color: #e2e8f0;
+  }
+
   .ticker-modal-close {
     border: 1px solid rgba(148, 163, 184, .16);
     background: rgba(255, 255, 255, .04);
@@ -695,51 +739,68 @@
     flex: 0 0 auto;
   }
 
-  .ticker-modal-mainchart {
-    height: 500px;
-    margin: 0 18px 14px;
-    background: #131722;
-    border: 1px solid #1e222d;
-    border-radius: 10px;
-    overflow: hidden;
-  }
-
   .ticker-modal-body {
-    overflow: visible;
+    overflow: auto;
     padding: 0 18px 18px;
   }
 
-  .ticker-peer-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
+  .ticker-table-wrap {
+    border: 1px solid rgba(148, 163, 184, .16);
+    border-radius: 12px;
+    overflow: auto;
+    background: rgba(255, 255, 255, .03);
   }
 
-  .ticker-peer-card {
-    border: 1px solid rgba(148, 163, 184, .12);
-    border-radius: 14px;
-    padding: 14px;
-    background: rgba(255, 255, 255, .04);
-  }
-
-  .ticker-peer-chart {
-    height: 200px;
+  .ticker-metrics-table {
     width: 100%;
-    margin-top: 10px;
-    background: #131722;
-    border: 1px solid #1e222d;
-    border-radius: 8px;
-    overflow: hidden;
+    border-collapse: collapse;
+    min-width: 1140px;
   }
 
-  @media (max-width: 900px) {
-    .ticker-modal-mainchart {
-      height: 200px;
-    }
+  .ticker-metrics-table th,
+  .ticker-metrics-table td {
+    padding: .65rem .75rem;
+    border-bottom: 1px solid rgba(148, 163, 184, .14);
+    text-align: left;
+    font-size: .9rem;
+  }
 
-    .ticker-peer-chart {
-      height: 200px;
-    }
+  .ticker-metrics-table th {
+    font-size: .76rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #94a3b8;
+    position: sticky;
+    top: 0;
+    background: #0f172a;
+    z-index: 1;
+  }
+
+  .ticker-metrics-table tbody tr:hover {
+    background: rgba(148, 163, 184, .08);
+  }
+
+  .ticker-col {
+    font-weight: 700;
+    letter-spacing: .03em;
+  }
+
+  .ticker-col.is-base {
+    color: #60a5fa;
+  }
+
+  .ticker-metrics-table td.positive {
+    color: #10b981;
+    font-weight: 700;
+  }
+
+  .ticker-metrics-table td.negative {
+    color: #ef4444;
+    font-weight: 700;
+  }
+
+  .ticker-metrics-table td.neutral {
+    color: #94a3b8;
   }
 
   @media (max-width: 640px) {
@@ -750,10 +811,6 @@
     .ticker-modal {
       width: 100vw;
       max-height: none;
-    }
-
-    .ticker-peer-grid {
-      grid-template-columns: 1fr;
     }
   }
 </style>
@@ -771,7 +828,7 @@
 
   const metricKeys = ['1d', '1w', '1m', '3m', '6m', '1y', 'ytd'];
   const grid = document.getElementById('groups-grid');
-  const pills = document.querySelectorAll('.pill');
+  const pills = document.querySelectorAll('#timeframe-pills .pill');
   pills.forEach(pill => {
     pill.classList.toggle('is-active', pill.dataset.key === currentKey);
   });
@@ -807,6 +864,14 @@
     return `${sign}${Number(v).toFixed(2)}%`;
   }
 
+  function fmtPctWithClass(v) {
+    const num = Number(v);
+    return {
+      text: fmtPct(num),
+      cls: clsForValue(Number.isFinite(num) ? num : 0),
+    };
+  }
+
   function filteredRows() {
     return initialData
       .filter(row => !searchTerm || row.label.toLowerCase().includes(searchTerm))
@@ -838,6 +903,46 @@
     return ['1w', '1m', '3m', 'ytd'];
   }
 
+  function normalizeIndustryLabel(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/&/g, 'and')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function findIndustryRanks(industryLabel) {
+    const keys = ['1w', '1m', '3m', 'ytd'];
+    const normalizedTarget = normalizeIndustryLabel(industryLabel);
+    if (!normalizedTarget) {
+      return keys.map(k => ({ key: k, rank: null, total: 0 }));
+    }
+
+    const rows = Array.isArray(initialData) ? initialData : [];
+    const matchedRow = rows.find(row => {
+      const label = normalizeIndustryLabel(row?.label);
+      if (!label) return false;
+      return label === normalizedTarget || label.includes(normalizedTarget) || normalizedTarget.includes(label);
+    });
+
+    return keys.map(k => {
+      const ordered = rows
+        .filter(r => Number.isFinite(Number(r?.[k])))
+        .sort((a, b) => Number(b?.[k]) - Number(a?.[k]));
+
+      if (!matchedRow || !ordered.length) {
+        return { key: k, rank: null, total: ordered.length };
+      }
+
+      const idx = ordered.findIndex(r => r?.label === matchedRow?.label);
+      return {
+        key: k,
+        rank: idx >= 0 ? idx + 1 : null,
+        total: ordered.length,
+      };
+    });
+  }
+
   function renderCards() {
     const rows = Array.isArray(filteredRows()) ? filteredRows() : [];
     syncActivePill();
@@ -861,7 +966,7 @@
       const tickerSlug = String(row?.ticker_slug ?? '');
       const screenerPath = String(row?.screener_url ?? '');
       const screenerHref = tickerSlug
-        ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},sh_curvol_ousd100000,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
+        ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
         : 'https://finviz.com/groups.ashx';
       const mainValue = Number(row?.[currentKey]);
 
@@ -1046,6 +1151,198 @@
     return { chart, ro };
   }
 
+  function computeAtrPercent(candles, length = 14) {
+    if (!Array.isArray(candles) || candles.length < length + 1) return null;
+
+    const trueRanges = [];
+    for (let i = 1; i < candles.length; i += 1) {
+      const cur = candles[i];
+      const prev = candles[i - 1];
+      if (!cur || !prev) continue;
+
+      const tr = Math.max(
+        Number(cur.high) - Number(cur.low),
+        Math.abs(Number(cur.high) - Number(prev.close)),
+        Math.abs(Number(cur.low) - Number(prev.close)),
+      );
+      if (Number.isFinite(tr)) trueRanges.push(tr);
+    }
+
+    if (trueRanges.length < length) return null;
+    const recent = trueRanges.slice(-length);
+    const atr = recent.reduce((sum, value) => sum + value, 0) / length;
+    const lastClose = Number(candles[candles.length - 1]?.close);
+    if (!Number.isFinite(atr) || !Number.isFinite(lastClose) || lastClose <= 0) return null;
+    return (atr / lastClose) * 100;
+  }
+
+  function computeAtrValue(candles, length = 14) {
+    if (!Array.isArray(candles) || candles.length < length + 1) return null;
+
+    const trueRanges = [];
+    for (let i = 1; i < candles.length; i += 1) {
+      const cur = candles[i];
+      const prev = candles[i - 1];
+      if (!cur || !prev) continue;
+
+      const tr = Math.max(
+        Number(cur.high) - Number(cur.low),
+        Math.abs(Number(cur.high) - Number(prev.close)),
+        Math.abs(Number(cur.low) - Number(prev.close)),
+      );
+      if (Number.isFinite(tr)) trueRanges.push(tr);
+    }
+
+    if (trueRanges.length < length) return null;
+    const recent = trueRanges.slice(-length);
+    const atr = recent.reduce((sum, value) => sum + value, 0) / length;
+    return Number.isFinite(atr) && atr > 0 ? atr : null;
+  }
+
+  function computeSma(candles, length) {
+    if (!Array.isArray(candles) || candles.length < length) return null;
+    const closes = candles.slice(-length).map(c => Number(c.close)).filter(Number.isFinite);
+    if (closes.length < length) return null;
+    const sum = closes.reduce((acc, v) => acc + v, 0);
+    return sum / length;
+  }
+
+  function computeEma(candles, length) {
+    if (!Array.isArray(candles) || candles.length < length) return null;
+    const closes = candles.map(c => Number(c.close)).filter(Number.isFinite);
+    if (closes.length < length) return null;
+
+    const k = 2 / (length + 1);
+    let ema = closes.slice(0, length).reduce((acc, v) => acc + v, 0) / length;
+    for (let i = length; i < closes.length; i += 1) {
+      ema = closes[i] * k + ema * (1 - k);
+    }
+    return ema;
+  }
+
+  function computeAtrsAway(candles, baselineType) {
+    if (!Array.isArray(candles) || !candles.length) return null;
+
+    const lastClose = Number(candles[candles.length - 1]?.close);
+    const atr = computeAtrValue(candles, 14);
+    if (!Number.isFinite(lastClose) || !Number.isFinite(atr) || atr <= 0) return null;
+
+    const baseline = baselineType === 'sma50'
+      ? computeSma(candles, 50)
+      : computeEma(candles, 21);
+
+    if (!Number.isFinite(baseline)) return null;
+    return (lastClose - baseline) / atr;
+  }
+
+  function fmtNumber(v, decimals = 2) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return Number(v).toFixed(decimals);
+  }
+
+  function fmtDollarCompact(v) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '—';
+    if (Math.abs(n) >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
+    if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+    if (Math.abs(n) >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+    return `$${n.toFixed(0)}`;
+  }
+
+  function computeAvgDollarVolume20(closeSeries, volumeSeries) {
+    if (!Array.isArray(closeSeries) || !Array.isArray(volumeSeries)) return null;
+    const closeByTime = new Map(closeSeries.map(p => [Number(p.time), Number(p.value)]));
+
+    const dollars = volumeSeries
+      .map(v => {
+        const t = Number(v.time);
+        const close = closeByTime.get(t);
+        const vol = Number(v.value);
+        if (!Number.isFinite(close) || !Number.isFinite(vol)) return null;
+        return close * vol;
+      })
+      .filter(Number.isFinite);
+
+    if (dollars.length < 1) return null;
+    const recent = dollars.slice(-20);
+    return recent.reduce((sum, d) => sum + d, 0) / recent.length;
+  }
+
+  function computeYtdPercent(candles) {
+    if (!Array.isArray(candles) || !candles.length) return null;
+    const lastClose = Number(candles[candles.length - 1]?.close);
+    if (!Number.isFinite(lastClose) || lastClose <= 0) return null;
+
+    const currentYear = new Date(Number(candles[candles.length - 1]?.time) * 1000).getUTCFullYear();
+    const ytdStartBar = candles.find(c => new Date(Number(c.time) * 1000).getUTCFullYear() === currentYear) || candles[0];
+    const ytdStartClose = Number(ytdStartBar?.close);
+    if (!Number.isFinite(ytdStartClose) || ytdStartClose <= 0) return null;
+    return ((lastClose / ytdStartClose) - 1) * 100;
+  }
+
+  function computeDailyChangePercent(candles) {
+    if (!Array.isArray(candles) || candles.length < 2) return null;
+    const lastClose = Number(candles[candles.length - 1]?.close);
+    const prevClose = Number(candles[candles.length - 2]?.close);
+    if (!Number.isFinite(lastClose) || !Number.isFinite(prevClose) || prevClose <= 0) return null;
+    return ((lastClose / prevClose) - 1) * 100;
+  }
+
+  function renderLookupMetricsTable(rows) {
+    if (!Array.isArray(rows) || !rows.length) {
+      return '<div class="empty-state-inline">No data available.</div>';
+    }
+
+    return `
+      <div class="ticker-table-wrap">
+        <table class="ticker-metrics-table">
+          <thead>
+            <tr>
+              <th scope="col">Ticker</th>
+              <th scope="col">Company</th>
+              <th scope="col">Today %</th>
+              <th scope="col">Avg $Vol</th>
+              <th scope="col">ATR%</th>
+              <th scope="col">YTD %</th>
+              <th scope="col">ATRs vs 50SMA</th>
+              <th scope="col">ATRs vs 21EMA</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(row => {
+              const today = fmtPctWithClass(row.todayChangePct);
+              const atr = fmtPctWithClass(row.atrPct);
+              const ytd = fmtPctWithClass(row.ytdPct);
+              const avgDolVol20 = fmtDollarCompact(row.avgDollarVol20);
+              const atrsFrom50 = {
+                text: fmtNumber(row.atrsFromSma50, 2),
+                cls: clsForValue(Number.isFinite(Number(row.atrsFromSma50)) ? Number(row.atrsFromSma50) : 0),
+              };
+              const atrsFrom21 = {
+                text: fmtNumber(row.atrsFromEma21, 2),
+                cls: clsForValue(Number.isFinite(Number(row.atrsFromEma21)) ? Number(row.atrsFromEma21) : 0),
+              };
+
+              return `
+                <tr>
+                  <td class="ticker-col ${row.isBase ? 'is-base' : ''}">${escapeHtml(row.ticker)}</td>
+                  <td>${escapeHtml(row.company || '—')}</td>
+                  <td class="${today.cls}">${today.text}</td>
+                  <td>${avgDolVol20}</td>
+                  <td class="${atr.cls}">${atr.text}</td>
+                  <td class="${ytd.cls}">${ytd.text}</td>
+                  <td class="${atrsFrom50.cls}">${atrsFrom50.text}</td>
+                  <td class="${atrsFrom21.cls}">${atrsFrom21.text}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
   async function runTickerLookup() {
     const ticker = tickerLookupInput.value.trim().toUpperCase();
     if (!ticker || !resultEl) return;
@@ -1077,10 +1374,21 @@
         return;
       }
 
-      const peerRows = (data.peers || []).slice(0, 6).map(t => ({
+      const peerRows = (data.peers || []).map(t => ({
         ticker: t,
         company: ''
       }));
+
+      const rankRows = findIndustryRanks(data.industry);
+      const ranksHtml = rankRows.map(r => {
+        const value = r.rank ? `${r.rank}/${r.total}` : '—';
+        return `
+          <span class="ticker-rank-chip">
+            <span class="ticker-rank-k">${escapeHtml(r.key.toUpperCase())}</span>
+            <span class="ticker-rank-v">${escapeHtml(value)}</span>
+          </span>
+        `;
+      }).join('');
 
       console.log('[lookup] peers', peerRows);
       console.log('[lookup] finviz parsed peers before yfinance', data?.debug?.finviz_parsed_peers || data.peers || []);
@@ -1103,28 +1411,13 @@
                   <span>•</span>
                   <span>${escapeHtml(data.industry || '—')}</span>
                 </div>
+                <div class="ticker-rank-row">${ranksHtml}</div>
               </div>
               <button class="ticker-modal-close" type="button" aria-label="Close">✕</button>
             </div>
-
-            <div class="ticker-modal-mainchart" id="lookup-chart-main"></div>
-
             <div class="ticker-modal-body">
-              ${peerRows.length ? `
-                <div class="ticker-peer-grid">
-                  ${peerRows.map(peer => `
-                    <article class="ticker-peer-card">
-                      <div class="ticker-peer-top">
-                        <div class="ticker-peer-symbol">${escapeHtml(peer.ticker)}</div>
-                        <div class="ticker-peer-name">${escapeHtml(peer.company || '—')}</div>
-                      </div>
-                      <div class="ticker-peer-chart" id="peer-chart-${peer.ticker}"></div>
-                    </article>
-                  `).join('')}
-                </div>
-              ` : `
-                <div class="empty-state-inline">No related peers found for ${escapeHtml(data.ticker)}.</div>
-              `}
+              <div class="pop-loading" id="lookup-metrics-loading">Loading table…</div>
+              <div id="lookup-metrics-table"></div>
             </div>
           </section>
         </div>
@@ -1151,35 +1444,43 @@
       document.addEventListener('keydown', onEscape);
       console.log('[lookup] HTML rendered');
 
-      console.log('[lookup] fetching main price series...');
-      const mainSeries = await fetchPriceSeries(data.ticker, '1d');
-      console.log('[lookup] main candles/price points', mainSeries.candles.length, mainSeries.price.length);
+      const loadingEl = resultEl.querySelector('#lookup-metrics-loading');
+      const tableEl = resultEl.querySelector('#lookup-metrics-table');
 
-      buildMiniChart(
-        document.getElementById('lookup-chart-main'),
-        mainSeries,
-        { compact: false }
-      );
+      const symbols = [
+        { ticker: data.ticker, company: data.company || '', isBase: true },
+        ...peerRows.map(peer => ({ ticker: peer.ticker, company: peer.company || '', isBase: false })),
+      ];
 
-      await Promise.all(
-        peerRows.map(async (peer) => {
-          try {
-            console.log('[lookup] fetching peer', peer.ticker);
-            const peerSeries = await fetchPriceSeries(peer.ticker, '1d');
-            console.log('[lookup] peer series', peer.ticker, peerSeries.candles.length, peerSeries.price.length);
+      const metricsRows = await Promise.all(symbols.map(async (row) => {
+        try {
+          const series = await fetchPriceSeries(row.ticker, '1d', 12000);
+          const candles = Array.isArray(series?.candles) ? series.candles : [];
+          return {
+            ...row,
+            company: row.company || series.company || '',
+            todayChangePct: computeDailyChangePercent(candles),
+            avgDollarVol20: computeAvgDollarVolume20(series.price, series.volume),
+            atrPct: computeAtrPercent(candles, 14),
+            ytdPct: computeYtdPercent(candles),
+            atrsFromSma50: computeAtrsAway(candles, 'sma50'),
+            atrsFromEma21: computeAtrsAway(candles, 'ema21'),
+          };
+        } catch (err) {
+          console.error('[lookup] metrics failed', row.ticker, err);
+          return {
+            ...row,
+            todayChangePct: null,
+            atrPct: null,
+            ytdPct: null,
+            atrsFromSma50: null,
+            atrsFromEma21: null,
+          };
+        }
+      }));
 
-            if (!peerSeries.candles.length && !peerSeries.price.length) return;
-
-            buildMiniChart(
-              document.getElementById(`peer-chart-${peer.ticker}`),
-              peerSeries,
-              { compact: true, showGrid: true }
-            );
-          } catch (err) {
-            console.error('[lookup] peer chart failed', peer.ticker, err);
-          }
-        })
-      );
+      if (loadingEl) loadingEl.remove();
+      if (tableEl) tableEl.innerHTML = renderLookupMetricsTable(metricsRows);
 
       console.log('[lookup] done');
     } catch (err) {
@@ -1189,8 +1490,20 @@
   }
 
 
-  async function fetchPriceSeries(symbol, interval = '1d') {
-    const res = await fetch(`/api/v3/ohlcv?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`);
+  async function fetchPriceSeries(symbol, interval = '1d', timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let res;
+    try {
+      res = await fetch(
+        `/api/v3/ohlcv?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
+        { signal: controller.signal }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
     if (!res.ok) {
       throw new Error(`OHLCV request failed for ${symbol}`);
     }
@@ -1211,7 +1524,14 @@
       .map(p => ({ time: Number(p.time), value: Number(p.value) }))
       .filter(p => Number.isFinite(p.time) && Number.isFinite(p.value));
 
-    return { candles, price };
+    return {
+      candles,
+      price,
+      company: String(json.company || '').trim(),
+      volume: (Array.isArray(json.volume) ? json.volume : [])
+        .map(v => ({ time: Number(v.time), value: Number(v.value) }))
+        .filter(v => Number.isFinite(v.time) && Number.isFinite(v.value)),
+    };
   }
 
   tickerLookupBtn?.addEventListener('click', runTickerLookup);
@@ -1411,7 +1731,7 @@
             <div class="pop-ticker">${escapeHtml(r.ticker)}</div>
             <div class="pop-name">${escapeHtml(r.company)}</div>
             <div class="pop-ytd">
-              <span class="pop-ytd-label">YTD Perf:</span>
+              <span class="pop-ytd-label">YTD: </span>
               <span class="pop-ytd-value ${clsForValue(Number(String(r.perf_ytd ?? '0').replace('%', '')))}">
                 ${escapeHtml(String(r.perf_ytd ?? '—'))}
               </span>

@@ -1290,6 +1290,23 @@ def api_stock_relations():
     debug = (request.args.get("debug") or "").strip().lower() in {"1", "true", "yes", "on"}
     relations = fetch_finviz_relations(ticker, debug=debug)
 
+    company = ""
+    sector = ""
+    industry = ""
+    try:
+        info = (yf.Ticker(ticker).info or {})
+        company = (
+            info.get("shortName")
+            or info.get("longName")
+            or info.get("displayName")
+            or ""
+        )
+        sector = info.get("sector") or ""
+        industry = info.get("industry") or ""
+    except Exception as e:
+        if debug:
+            app.logger.info("[stock-relations] metadata lookup failed for %s: %s", ticker, e)
+
     peers = relations.get("peers") or []
     held_by = relations.get("held_by_etfs") or []
 
@@ -1306,9 +1323,9 @@ def api_stock_relations():
     return jsonify({
         "ok": bool(relations.get("ok", False)),
         "ticker": ticker,
-        "company": "",
-        "sector": "",
-        "industry": "",
+        "company": company,
+        "sector": sector,
+        "industry": industry,
         "peers": peers,
         "held_by_etfs": held_by,
         "source": relations.get("source"),
@@ -2042,7 +2059,22 @@ def api_v3_ohlcv():
             t = c["time"]
             dt_utc = dt.fromtimestamp(t, tz=timezone.utc)
             dt_et = dt_utc.astimezone(et_tz)
+
+        company = ""
+        try:
+            info = (yf.Ticker(symbol).info or {})
+            company = (
+                info.get("shortName")
+                or info.get("longName")
+                or info.get("displayName")
+                or ""
+            )
+        except Exception:
+            company = ""
+
         return jsonify({
+            "symbol": symbol,
+            "company": company,
             "candles": candles,
             "volume": volume,
             "price": close_line,

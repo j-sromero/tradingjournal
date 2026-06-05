@@ -32,7 +32,7 @@ _MARKET_GROUPS_TOP10_TTL = 300
 _FINVIZ_SCREENER_URL = (
     "https://finviz.com/screener"
     "?v=151&p=d"
-    "&f=ind_{industry},sh_curvol_ousd100000,sh_price_o10,ta_sma20_sa50,ta_sma50_sa200,tad_0_sma:200:sma:d"
+    "&f=ind_{industry},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200,tad_0_sma:200:sma:d"
     "&ft=4&o=-perfytd"
     "&c=0,1,2,4,6,67,65,66,31,49,57,47"
 )
