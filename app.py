@@ -6,6 +6,7 @@ import os
 import io
 import csv
 import json
+import time
 import tempfile
 import zipfile
 import sqlite3
@@ -71,6 +72,32 @@ def configure_logging(flask_app):
 
 
 configure_logging(app)
+
+
+def _is_yf_invalid_crumb_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "invalid crumb" in text
+        or ("unauthorized" in text and "finance" in text and '"result":null' in text)
+        or "unable to access this feature" in text
+        or "yahoo-finance-api-feedback" in text
+    )
+
+
+def _run_yf_with_invalid_crumb_retry(fn, retries: int = 2, base_delay: float = 0.45):
+    """Retry yfinance calls when Yahoo returns a transient Invalid Crumb response."""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_yf_invalid_crumb_error(exc) or attempt >= retries:
+                raise
+            time.sleep(base_delay * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Unexpected yfinance retry state")
 
 def parse_yyyymmddhhmm(val):
     if not val or len(val) < 12:
@@ -1913,8 +1940,15 @@ def api_v3_ohlcv():
     et_tz = ZoneInfo("America/New_York")
 
     try:
-        df = yf.download(symbol, period=period, interval=interval,
-                         progress=False, auto_adjust=True)
+        df = _run_yf_with_invalid_crumb_retry(
+            lambda: yf.download(
+                symbol,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=True,
+            )
+        )
         if df.empty:
             return jsonify({"error": "no data"}), 404
 
@@ -2062,7 +2096,7 @@ def api_v3_ohlcv():
 
         company = ""
         try:
-            info = (yf.Ticker(symbol).info or {})
+            info = _run_yf_with_invalid_crumb_retry(lambda: (yf.Ticker(symbol).info or {}))
             company = (
                 info.get("shortName")
                 or info.get("longName")
@@ -3516,9 +3550,12 @@ def chart_data(ticker):
         raw        = fetch(interval, ticker)
         stock_data = process_yahoo_chart(raw["chart"]["result"])
 
-        stock      = yf.Ticker(ticker)
-        info       = stock.info or {}
-        sector     = info.get("sector")
+        sector = None
+        try:
+            info = _run_yf_with_invalid_crumb_retry(lambda: (yf.Ticker(ticker).info or {}))
+            sector = info.get("sector")
+        except Exception as exc:
+            app.logger.warning("Ticker info unavailable for %s: %s", ticker, exc)
         etfticker  = get_etf_for_sector(sector) if sector else "SPY"
 
         etfraw  = fetch(interval, etfticker)

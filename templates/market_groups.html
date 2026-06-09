@@ -1289,10 +1289,34 @@
     return ((lastClose / prevClose) - 1) * 100;
   }
 
+  function computeChangeFromOpenPercent(candles) {
+    if (!Array.isArray(candles) || !candles.length) return null;
+    const last = candles[candles.length - 1];
+    const open = Number(last?.open);
+    const close = Number(last?.close);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || open <= 0) return null;
+    return ((close / open) - 1) * 100;
+  }
+
   function renderLookupMetricsTable(rows) {
     if (!Array.isArray(rows) || !rows.length) {
       return '<div class="empty-state-inline">No data available.</div>';
     }
+
+    const sortedRows = [...rows].sort((a, b) => {
+      const aYtd = Number(a?.ytdPct);
+      const bYtd = Number(b?.ytdPct);
+      const aOk = Number.isFinite(aYtd);
+      const bOk = Number.isFinite(bYtd);
+
+      if (aOk && bOk) {
+        if (bYtd !== aYtd) return bYtd - aYtd;
+      } else if (aOk !== bOk) {
+        return aOk ? -1 : 1;
+      }
+
+      return String(a?.ticker || '').localeCompare(String(b?.ticker || ''));
+    });
 
     return `
       <div class="ticker-table-wrap">
@@ -1302,6 +1326,7 @@
               <th scope="col">Ticker</th>
               <th scope="col">Company</th>
               <th scope="col">Today %</th>
+              <th scope="col">Open %</th>
               <th scope="col">Avg $Vol</th>
               <th scope="col">ATR%</th>
               <th scope="col">YTD %</th>
@@ -1310,9 +1335,10 @@
             </tr>
           </thead>
           <tbody>
-            ${rows.map(row => {
+            ${sortedRows.map(row => {
               const today = fmtPctWithClass(row.todayChangePct);
-              const atr = fmtPctWithClass(row.atrPct);
+              const fromOpen = fmtPctWithClass(row.openChangePct);
+              const atrText = fmtPct(row.atrPct);
               const ytd = fmtPctWithClass(row.ytdPct);
               const avgDolVol20 = fmtDollarCompact(row.avgDollarVol20);
               const atrsFrom50 = {
@@ -1329,8 +1355,9 @@
                   <td class="ticker-col ${row.isBase ? 'is-base' : ''}">${escapeHtml(row.ticker)}</td>
                   <td>${escapeHtml(row.company || '—')}</td>
                   <td class="${today.cls}">${today.text}</td>
+                  <td class="${fromOpen.cls}">${fromOpen.text}</td>
                   <td>${avgDolVol20}</td>
-                  <td class="${atr.cls}">${atr.text}</td>
+                  <td>${atrText}</td>
                   <td class="${ytd.cls}">${ytd.text}</td>
                   <td class="${atrsFrom50.cls}">${atrsFrom50.text}</td>
                   <td class="${atrsFrom21.cls}">${atrsFrom21.text}</td>
@@ -1460,6 +1487,7 @@
             ...row,
             company: row.company || series.company || '',
             todayChangePct: computeDailyChangePercent(candles),
+            openChangePct: computeChangeFromOpenPercent(candles),
             avgDollarVol20: computeAvgDollarVolume20(series.price, series.volume),
             atrPct: computeAtrPercent(candles, 14),
             ytdPct: computeYtdPercent(candles),
@@ -1471,6 +1499,7 @@
           return {
             ...row,
             todayChangePct: null,
+            openChangePct: null,
             atrPct: null,
             ytdPct: null,
             atrsFromSma50: null,
