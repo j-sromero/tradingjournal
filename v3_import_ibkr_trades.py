@@ -447,6 +447,23 @@ def _row_exists(conn, r):
     return row is not None
 
 
+def _closed_position_exists(conn, r):
+    """Check if a closed position already exists for this open position (same symbol & entry_datetime)."""
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM trades
+        WHERE symbol = ?
+          AND entry_datetime = ?
+          AND exit_datetime IS NOT NULL
+          AND exit_price IS NOT NULL
+        LIMIT 1
+        """,
+        (r["symbol"], r["entry_datetime"]),
+    ).fetchone()
+    return row is not None
+
+
 def insert_trades(db_path: str, rows):
     conn = sqlite3.connect(db_path)
     inserted = 0
@@ -454,12 +471,13 @@ def insert_trades(db_path: str, rows):
     try:
         for r in rows:
             # First, try to find an open trade to update
+            # Use tolerance-based comparison for entry_price to handle floating-point precision
             existing = conn.execute(
                 """
                 SELECT id, ib_commission FROM trades
                 WHERE symbol = ?
                   AND entry_datetime = ?
-                  AND entry_price = ?
+                  AND ABS(entry_price - ?) < 1e-9
                   AND exit_datetime IS NULL
                   AND exit_price IS NULL
                 LIMIT 1
@@ -490,6 +508,11 @@ def insert_trades(db_path: str, rows):
                 continue
             # Otherwise, fall back to normal insert if not duplicate
             if _row_exists(conn, r):
+                skipped += 1
+                continue
+            
+            # For open positions, check if closed version already exists
+            if r["exit_datetime"] is None and _closed_position_exists(conn, r):
                 skipped += 1
                 continue
             try:
