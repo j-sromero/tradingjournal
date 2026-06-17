@@ -474,7 +474,7 @@ def insert_trades(db_path: str, rows):
             # Use tolerance-based comparison for entry_price to handle floating-point precision
             existing = conn.execute(
                 """
-                SELECT id, ib_commission FROM trades
+                SELECT id, quantity, ib_commission FROM trades
                 WHERE symbol = ?
                   AND entry_datetime = ?
                   AND ABS(entry_price - ?) < 1e-9
@@ -489,19 +489,72 @@ def insert_trades(db_path: str, rows):
                 and r.get("exit_datetime")
                 and r.get("exit_price") is not None
             ):
-                # Update the open trade with exit info and add commission
-                new_comm = float(existing[1] or 0) + float(r.get("ib_commission") or 0)
+                open_id = existing[0]
+                open_qty = float(existing[1] or 0)
+                open_comm = float(existing[2] or 0)
+                close_qty = float(r.get("quantity") or 0)
+
+                # Guard against invalid close quantities.
+                if close_qty <= 1e-12 or open_qty <= 1e-12:
+                    skipped += 1
+                    continue
+
+                # Partial close: keep remaining shares open and insert a closed row for the matched quantity.
+                if close_qty < open_qty - 1e-9:
+                    ratio = close_qty / open_qty
+                    entry_comm_alloc = open_comm * ratio
+                    remaining_qty = max(0.0, open_qty - close_qty)
+                    remaining_comm = max(0.0, open_comm - entry_comm_alloc)
+
+                    conn.execute(
+                        """
+                        UPDATE trades
+                        SET quantity = ?, ib_commission = ?
+                        WHERE id = ?
+                        """,
+                        (remaining_qty, r2(remaining_comm), open_id),
+                    )
+
+                    if _row_exists(conn, r):
+                        skipped += 1
+                    else:
+                        try:
+                            cur = conn.execute(
+                                """
+                                INSERT INTO trades
+                                (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    r["symbol"],
+                                    r["entry_datetime"],
+                                    r["exit_datetime"],
+                                    r["entry_price"],
+                                    r["exit_price"],
+                                    r["quantity"],
+                                    r["ib_commission"],
+                                ),
+                            )
+                            inserted += cur.rowcount
+                        except sqlite3.IntegrityError as e:
+                            print(f"[SKIP] IntegrityError for row: {r} ({e})")
+                            skipped += 1
+                    continue
+
+                # Full close (or overshoot due to rounding/noise): close the open leg in-place.
+                new_comm = open_comm + float(r.get("ib_commission") or 0)
                 conn.execute(
                     """
                     UPDATE trades
-                    SET exit_datetime = ?, exit_price = ?, ib_commission = ?
+                    SET exit_datetime = ?, exit_price = ?, ib_commission = ?, quantity = ?
                     WHERE id = ?
                     """,
                     (
                         r["exit_datetime"],
                         r["exit_price"],
                         new_comm,
-                        existing[0],
+                        open_qty,
+                        open_id,
                     ),
                 )
                 inserted += 1
