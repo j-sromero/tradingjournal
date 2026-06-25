@@ -108,8 +108,6 @@ def aggregate_closed_trades(closed_rows):
                 "quantity": sum(x["quantity"] for x in group),
                 "ib_commission": round(ib_commission, 6),
             })
-    for row in aggregated:
-        print(row)
     return aggregated
 
 def init_db(db_path: str) -> None:
@@ -251,7 +249,6 @@ class IBKRTradesHTMLParser(HTMLParser):
 
         if self.in_cell and tag == self.current_cell_tag:
             value = " ".join("".join(self.current_cell_text).split())
-            # Only print debug for ANF symbol rows or header rows
             if self.current_cell_tag == "th":
                 self.current_headers.append(value)
             else:
@@ -352,6 +349,7 @@ def build_trade_rows(rows):
                         "entry_datetime": f["datetime"],
                         "entry_price": f["trade_price"],
                         "comm_remaining": f["ib_commission"],
+                        "had_close": False,
                     }
                 )
                 continue
@@ -379,6 +377,8 @@ def build_trade_rows(rows):
                 }
                 raw_closures.append(closure)
 
+                # Mark lot as partially/fully matched by a closing fill.
+                lot["had_close"] = True
                 lot["qty"] -= match_qty
                 lot["comm_remaining"] -= entry_comm_alloc
                 to_close -= match_qty
@@ -397,6 +397,7 @@ def build_trade_rows(rows):
                 "exit_price": None,
                 "quantity": r2(lot["qty"]),
                 "ib_commission": r2(max(0.0, lot["comm_remaining"])),
+                "_from_partial_close": bool(lot.get("had_close")),
             }
             open_rows.append(open_row)
 
@@ -448,18 +449,42 @@ def _row_exists(conn, r):
 
 
 def _closed_position_exists(conn, r):
-    """Check if a closed position already exists for this open position (same symbol & entry_datetime)."""
+        """Check if a matching closed position already exists for this open row.
+
+        This is intentionally strict (quantity + entry_price match) so partial closes
+        don't suppress valid remaining open quantity for the same entry datetime.
+        """
+        row = conn.execute(
+                """
+                SELECT 1
+                FROM trades
+                WHERE symbol = ?
+                    AND entry_datetime = ?
+                    AND ABS(quantity - ?) < 1e-9
+                    AND ABS(entry_price - ?) < 1e-9
+                    AND exit_datetime IS NOT NULL
+                    AND exit_price IS NOT NULL
+                LIMIT 1
+                """,
+                (r["symbol"], r["entry_datetime"], r["quantity"], r["entry_price"]),
+        ).fetchone()
+        return row is not None
+
+
+def _closed_key_exists(conn, r):
+    """Check if a closed trade already exists for the UNIQUE key (symbol, entry_datetime, exit_datetime)."""
+    if not r.get("exit_datetime"):
+        return False
     row = conn.execute(
         """
         SELECT 1
         FROM trades
         WHERE symbol = ?
           AND entry_datetime = ?
-          AND exit_datetime IS NOT NULL
-          AND exit_price IS NOT NULL
+          AND exit_datetime = ?
         LIMIT 1
         """,
-        (r["symbol"], r["entry_datetime"]),
+        (r["symbol"], r["entry_datetime"], r["exit_datetime"]),
     ).fetchone()
     return row is not None
 
@@ -476,13 +501,13 @@ def insert_trades(db_path: str, rows):
                 """
                 SELECT id, quantity, ib_commission FROM trades
                 WHERE symbol = ?
-                  AND entry_datetime = ?
+                                    AND entry_datetime = ?
                   AND ABS(entry_price - ?) < 1e-9
                   AND exit_datetime IS NULL
                   AND exit_price IS NULL
                 LIMIT 1
                 """,
-                (r["symbol"], r["entry_datetime"], r["entry_price"])
+                                (r["symbol"], r["entry_datetime"], r["entry_price"])
             ).fetchone()
             if (
                 existing
@@ -543,6 +568,14 @@ def insert_trades(db_path: str, rows):
 
                 # Full close (or overshoot due to rounding/noise): close the open leg in-place.
                 new_comm = open_comm + float(r.get("ib_commission") or 0)
+
+                # If this closed key already exists, updating the open row would violate UNIQUE.
+                # Keep the already-closed row and remove this stale open duplicate.
+                if _closed_key_exists(conn, r):
+                    conn.execute("DELETE FROM trades WHERE id = ?", (open_id,))
+                    skipped += 1
+                    continue
+
                 conn.execute(
                     """
                     UPDATE trades
@@ -565,7 +598,11 @@ def insert_trades(db_path: str, rows):
                 continue
             
             # For open positions, check if closed version already exists
-            if r["exit_datetime"] is None and _closed_position_exists(conn, r):
+            if (
+                r["exit_datetime"] is None
+                and not r.get("_from_partial_close")
+                and _closed_position_exists(conn, r)
+            ):
                 skipped += 1
                 continue
             try:
@@ -615,4 +652,5 @@ def merge_open_trades(open_rows):
             m["quantity"] = total_q
             m["ib_commission"] = round(c1 + c2, 6)
             m["entry_price"] = round((p1 * q1 + p2 * q2) / total_q, 6) if total_q else p1
+            m["_from_partial_close"] = bool(m.get("_from_partial_close") or t.get("_from_partial_close"))
     return list(merged.values())

@@ -1371,7 +1371,7 @@ def trades_list():
     status = request.args.get("status", "")
     setup = request.args.get("setup", "")
     selected_day = normalize_iso_day(request.args.get("day", "").strip())
-    merge_open = request.args.get("merge_open") == "1"
+    merge_open = (request.args.get("merge_open", "") or "").strip().lower() in {"1", "true", "yes", "on"}
     show_individual = request.args.get("raw") == "1"
     selected_campaign = request.args.get("campaign", "").strip()
     sql = "SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%')"
@@ -1507,7 +1507,7 @@ def v3_trades_list():
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "")
     selected_day = normalize_iso_day(request.args.get("day", "").strip())
-    merge_open = request.args.get("merge_open") == "1"
+    merge_open = (request.args.get("merge_open", "") or "").strip().lower() in {"1", "true", "yes", "on"}
     year = request.args.get("year", "").strip()
 
     conn = sqlite3.connect(V3_DB_PATH)
@@ -1557,6 +1557,7 @@ def v3_trades_list():
 
             if merged_key not in merged:
                 merged[merged_key] = dict(row)
+                merged[merged_key]["_source_ids"] = [int(row["id"])]
                 merged[merged_key]["_entry_notional"] = float(row["entry_price"] or 0) * float(row["quantity"] or 0)
                 order.append(merged_key)
                 continue
@@ -1577,10 +1578,49 @@ def v3_trades_list():
                 current["entry_datetime"] = row["entry_datetime"]
             if row["exit_datetime"] and (not current["exit_datetime"] or row["exit_datetime"] > current["exit_datetime"]):
                 current["exit_datetime"] = row["exit_datetime"]
+            current.setdefault("_source_ids", []).append(int(row["id"]))
 
         for item in merged.values():
             item.pop("_entry_notional", None)
         return [merged[key] for key in order]
+
+    def _to_trade_row(r):
+        entry_iso = _to_iso(r["entry_datetime"])
+        exit_iso = _to_iso(r["exit_datetime"])
+        size = float(r["quantity"] or 0)
+        entry_price = float(r["entry_price"] or 0)
+        exit_price = None if r["exit_price"] is None else float(r["exit_price"] or 0)
+        fees = float(r["ib_commission"] or 0)
+
+        pnl_abs = None
+        pnl_pct = None
+        if exit_price is not None:
+            pnl_abs = (exit_price - entry_price) * size - fees
+            cost = entry_price * size
+            pnl_pct = (pnl_abs / cost * 100) if cost else None
+
+        source_ids = r.get("_source_ids") if isinstance(r, dict) else None
+        if not source_ids:
+            source_ids = [int(r["id"])]
+
+        return {
+            "id": int(r["id"]),
+            "symbol": r["symbol"],
+            "entry_datetime": r["entry_datetime"],
+            "direction": "long",
+            "entry_date": entry_iso,
+            "exit_date": exit_iso,
+            "entry_price": round(entry_price, 2),
+            "exit_price": None if exit_price is None else round(exit_price, 2),
+            "size": round(size, 2),
+            "setup": "v3 import",
+            "status": "closed" if exit_iso else "open",
+            "pnl_abs": None if pnl_abs is None else round(pnl_abs, 2),
+            "pnl_pct": None if pnl_pct is None else round(pnl_pct, 2),
+            "r_multiple": None,
+            "fees": fees,
+            "source_ids": [int(x) for x in source_ids],
+        }
 
 
     # Always get all years from all trades for dropdown
@@ -1597,45 +1637,14 @@ def v3_trades_list():
         conn2.close()
     all_years = sorted(all_years_set, reverse=True)
 
-    if merge_open:
-        rows = _merge_open_trades(rows)
+    rows_unmerged = [dict(r) for r in rows]
+    source_trade_map = {int(r["id"]): _to_trade_row(r) for r in rows_unmerged}
+    rows = _merge_open_trades(rows_unmerged) if merge_open else rows_unmerged
 
     # Group v3 trades by symbol and entry_datetime
     trade_rows = []
     for r in rows:
-        entry_iso = _to_iso(r["entry_datetime"])
-        exit_iso = _to_iso(r["exit_datetime"])
-        size = float(r["quantity"] or 0)
-        entry_price = float(r["entry_price"] or 0)
-        exit_price = None if r["exit_price"] is None else float(r["exit_price"] or 0)
-        fees = float(r["ib_commission"] or 0)
-
-        pnl_abs = None
-        pnl_pct = None
-        if exit_price is not None:
-            pnl_abs = (exit_price - entry_price) * size - fees
-            cost = entry_price * size
-            pnl_pct = (pnl_abs / cost * 100) if cost else None
-
-        trade_rows.append(
-            {
-                "id": int(r["id"]),
-                "symbol": r["symbol"],
-                "entry_datetime": r["entry_datetime"],
-                "direction": "long",
-                "entry_date": entry_iso,
-                "exit_date": exit_iso,
-                "entry_price": round(entry_price, 2),
-                "exit_price": None if exit_price is None else round(exit_price, 2),
-                "size": round(size, 2),
-                "setup": "v3 import",
-                "status": "closed" if exit_iso else "open",
-                "pnl_abs": None if pnl_abs is None else round(pnl_abs, 2),
-                "pnl_pct": None if pnl_pct is None else round(pnl_pct, 2),
-                "r_multiple": None,
-                "fees": fees,
-            }
-        )
+        trade_rows.append(_to_trade_row(r))
 
     # Group by (symbol, entry_datetime)
     from collections import defaultdict
@@ -1700,6 +1709,28 @@ def v3_trades_list():
                 t.get("id") or 0,
             ),
         )
+
+        if merge_open:
+            expanded_members = []
+            for t in selected_members:
+                source_ids = t.get("source_ids") or [t.get("id")]
+                if len(source_ids) <= 1:
+                    expanded_members.append(dict(t))
+                    continue
+                for source_id in source_ids:
+                    src = source_trade_map.get(int(source_id))
+                    if src:
+                        expanded_members.append(dict(src))
+
+            selected_members = sorted(
+                expanded_members,
+                key=lambda t: (
+                    t.get("exit_date") or t.get("entry_date") or "",
+                    t.get("entry_date") or "",
+                    t.get("id") or 0,
+                ),
+            )
+
         trades = []
         for t in selected_members:
             t = dict(t)
@@ -2608,6 +2639,61 @@ def v3_import():
         "v3_import.html",
         flex_configured=bool(token and query_id),
     )
+
+
+@app.route("/api/v3/flex/raw")
+def api_v3_flex_raw():
+    """Debug endpoint: return raw Flex XML for the configured v3 credentials."""
+    v3_init_db(V3_DB_PATH)
+    v3_conn = sqlite3.connect(V3_DB_PATH)
+    v3_conn.row_factory = sqlite3.Row
+    try:
+        v3_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS v3_flex_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                query_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        v3_conn.commit()
+        cred_row = v3_conn.execute(
+            """
+            SELECT token, query_id
+            FROM v3_flex_credentials
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        v3_conn.close()
+
+    token_saved = ((cred_row["token"] if cred_row else "") or "").strip() or (get_setting("v3_ibkr_token", "") or "").strip()
+    query_id_saved = ((cred_row["query_id"] if cred_row else "") or "").strip() or (get_setting("v3_ibkr_query_id", "") or "").strip()
+
+    # Backward-compatible fallback to legacy IBKR settings.
+    token = token_saved or (get_setting("ibkr_token", "") or "").strip()
+    query_id = query_id_saved or (get_setting("ibkr_query_id", "") or "").strip()
+
+    if not token or not query_id:
+        return jsonify({
+            "ok": False,
+            "error": "Flex credentials are not configured (missing token/query_id).",
+        }), 400
+
+    try:
+        xml = fetch_flex_report(token, query_id)
+    except Exception as e:
+        app.logger.exception("v3 flex raw fetch failed")
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+    if not (xml or "").strip():
+        return jsonify({"ok": False, "error": "Flex query returned empty payload."}), 502
+
+    # Use plain text so browsers show the full payload directly for debugging.
+    return Response(xml, mimetype="text/plain; charset=utf-8")
 
 # ---------- Calendar ----------
 @app.route("/calendar")
