@@ -489,6 +489,23 @@ def _closed_key_exists(conn, r):
     return row is not None
 
 
+def _matching_open_rows(conn, r):
+        """Return open rows for the same lot key (symbol + entry datetime + entry price)."""
+        return conn.execute(
+                """
+                SELECT id, quantity, ib_commission
+                FROM trades
+                WHERE symbol = ?
+                    AND entry_datetime = ?
+                    AND ABS(entry_price - ?) < 1e-9
+                    AND exit_datetime IS NULL
+                    AND exit_price IS NULL
+                ORDER BY id ASC
+                """,
+                (r["symbol"], r["entry_datetime"], r["entry_price"]),
+        ).fetchall()
+
+
 def insert_trades(db_path: str, rows):
     conn = sqlite3.connect(db_path)
     inserted = 0
@@ -505,6 +522,7 @@ def insert_trades(db_path: str, rows):
                   AND ABS(entry_price - ?) < 1e-9
                   AND exit_datetime IS NULL
                   AND exit_price IS NULL
+                                ORDER BY id ASC
                 LIMIT 1
                 """,
                                 (r["symbol"], r["entry_datetime"], r["entry_price"])
@@ -514,6 +532,11 @@ def insert_trades(db_path: str, rows):
                 and r.get("exit_datetime")
                 and r.get("exit_price") is not None
             ):
+                # If this exact closed row already exists, do not mutate open quantity again.
+                if _row_exists(conn, r):
+                    skipped += 1
+                    continue
+
                 open_id = existing[0]
                 open_qty = float(existing[1] or 0)
                 open_comm = float(existing[2] or 0)
@@ -540,30 +563,27 @@ def insert_trades(db_path: str, rows):
                         (remaining_qty, r2(remaining_comm), open_id),
                     )
 
-                    if _row_exists(conn, r):
+                    try:
+                        cur = conn.execute(
+                            """
+                            INSERT INTO trades
+                            (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                r["symbol"],
+                                r["entry_datetime"],
+                                r["exit_datetime"],
+                                r["entry_price"],
+                                r["exit_price"],
+                                r["quantity"],
+                                r["ib_commission"],
+                            ),
+                        )
+                        inserted += cur.rowcount
+                    except sqlite3.IntegrityError as e:
+                        print(f"[SKIP] IntegrityError for row: {r} ({e})")
                         skipped += 1
-                    else:
-                        try:
-                            cur = conn.execute(
-                                """
-                                INSERT INTO trades
-                                (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    r["symbol"],
-                                    r["entry_datetime"],
-                                    r["exit_datetime"],
-                                    r["entry_price"],
-                                    r["exit_price"],
-                                    r["quantity"],
-                                    r["ib_commission"],
-                                ),
-                            )
-                            inserted += cur.rowcount
-                        except sqlite3.IntegrityError as e:
-                            print(f"[SKIP] IntegrityError for row: {r} ({e})")
-                            skipped += 1
                     continue
 
                 # Full close (or overshoot due to rounding/noise): close the open leg in-place.
@@ -592,11 +612,6 @@ def insert_trades(db_path: str, rows):
                 )
                 inserted += 1
                 continue
-            # Otherwise, fall back to normal insert if not duplicate
-            if _row_exists(conn, r):
-                skipped += 1
-                continue
-            
             # For open positions, check if closed version already exists
             if (
                 r["exit_datetime"] is None
@@ -605,6 +620,43 @@ def insert_trades(db_path: str, rows):
             ):
                 skipped += 1
                 continue
+
+            # Open rows are a current-state snapshot; reconcile existing open lot in-place.
+            if r["exit_datetime"] is None:
+                open_matches = _matching_open_rows(conn, r)
+                if open_matches:
+                    keep_id, keep_qty, keep_comm = open_matches[0]
+                    incoming_qty = float(r.get("quantity") or 0)
+                    incoming_comm = float(r.get("ib_commission") or 0)
+
+                    qty_same = abs(float(keep_qty or 0) - incoming_qty) < 1e-9
+                    comm_same = abs(float(keep_comm or 0) - incoming_comm) < 1e-9
+                    if not (qty_same and comm_same):
+                        conn.execute(
+                            """
+                            UPDATE trades
+                            SET quantity = ?, ib_commission = ?
+                            WHERE id = ?
+                            """,
+                            (incoming_qty, r2(incoming_comm), keep_id),
+                        )
+
+                    duplicate_ids = [row[0] for row in open_matches[1:]]
+                    if duplicate_ids:
+                        placeholders = ",".join("?" for _ in duplicate_ids)
+                        conn.execute(
+                            f"DELETE FROM trades WHERE id IN ({placeholders})",
+                            duplicate_ids,
+                        )
+
+                    skipped += 1
+                    continue
+
+            # Otherwise, fall back to normal insert if not duplicate
+            if _row_exists(conn, r):
+                skipped += 1
+                continue
+
             try:
                 cur = conn.execute(
                     """
