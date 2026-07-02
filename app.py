@@ -2023,19 +2023,39 @@ def api_v3_ohlcv():
         # If already tz-aware and in ET, leave as is
         df.index = idx
 
-        # Only check if entry_dt is provided
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
+        # Validate entry/exit against available data range
         first_bar = df.index[0]
         last_bar = df.index[-1]
+        utc = ZoneInfo("UTC")
+
         if entry_dt:
-            entry_dt_et = entry_dt.replace(tzinfo=et)
-            if entry_dt_et < first_bar:
-                return jsonify({"error": f"Requested entry date {entry_dt_et.strftime('%Y-%m-%d %H:%M')} is before first available OHLCV data ({first_bar.strftime('%Y-%m-%d %H:%M')}). Try a higher timeframe or a more recent entry date."}), 422
+            entry_dt_et = entry_dt.replace(tzinfo=et_tz)
+            if interval in intraday_intervals:
+                is_before = entry_dt_et < first_bar
+                first_bar_display = first_bar.strftime("%Y-%m-%d %H:%M")
+                entry_display = entry_dt_et.strftime("%Y-%m-%d %H:%M")
+            else:
+                # yfinance daily bars are timestamped at midnight UTC (= 20:00 ET prev day).
+                # Compare using UTC date to get the correct trading day.
+                is_before = entry_dt.date() < first_bar.astimezone(utc).date()
+                first_bar_display = first_bar.astimezone(utc).strftime("%Y-%m-%d")
+                entry_display = entry_dt.strftime("%Y-%m-%d")
+            if is_before:
+                return jsonify({"error": f"Requested entry date {entry_display} is before first available OHLCV data ({first_bar_display}). Try a higher timeframe or a more recent entry date."}), 422
         if exit_dt:
-            exit_dt_et = exit_dt.replace(tzinfo=et)
-            if exit_dt_et > last_bar:
-                return jsonify({"error": f"Requested exit date {exit_dt_et.strftime('%Y-%m-%d %H:%M')} is after last available OHLCV data ({last_bar.strftime('%Y-%m-%d %H:%M')}). Try a higher timeframe or a more recent exit date."}), 422
+            exit_dt_et = exit_dt.replace(tzinfo=et_tz)
+            if interval in intraday_intervals:
+                is_after = exit_dt_et > last_bar
+                last_bar_display = last_bar.strftime("%Y-%m-%d %H:%M")
+                exit_display = exit_dt_et.strftime("%Y-%m-%d %H:%M")
+            else:
+                # yfinance daily bars are timestamped at midnight UTC (= 20:00 ET prev day).
+                # Compare using UTC date to get the correct trading day.
+                is_after = exit_dt.date() > last_bar.astimezone(utc).date()
+                last_bar_display = last_bar.astimezone(utc).strftime("%Y-%m-%d")
+                exit_display = exit_dt.strftime("%Y-%m-%d")
+            if is_after:
+                return jsonify({"error": f"Requested exit date {exit_display} is after last available OHLCV data ({last_bar_display}). Try a higher timeframe or a more recent exit date."}), 422
 
         # Flatten MultiIndex columns if present
         if isinstance(df.columns, type(df.columns)) and hasattr(df.columns, "levels"):
