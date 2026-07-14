@@ -1646,11 +1646,20 @@ def v3_trades_list():
     for r in rows:
         trade_rows.append(_to_trade_row(r))
 
-    # Group by (symbol, entry_datetime)
+    # Group closed rows by shared exit timestamp (same symbol) to merge split entries
+    # that are closed together; keep open rows keyed by entry timestamp.
     from collections import defaultdict
     grouped = defaultdict(list)
+
+    def _group_key(t):
+        symbol = t["symbol"]
+        exit_dt = t.get("exit_date")
+        if exit_dt:
+            return (symbol, "closed", exit_dt)
+        return (symbol, "open", t.get("entry_datetime"))
+
     for t in trade_rows:
-        grouped[(t["symbol"], t["entry_datetime"])] .append(t)
+        grouped[_group_key(t)].append(t)
 
     trades = []
     campaign_map = {}
@@ -1687,7 +1696,8 @@ def v3_trades_list():
             t["group_count"] = len(group)
             t["group_ids"] = [tr["id"] for tr in group]
             t["ticker"] = t.get("symbol")
-            t["campaign_id"] = f"{t['symbol']}|{t['entry_datetime']}"
+            campaign_token = t.get("exit_date") or t.get("entry_datetime") or ""
+            t["campaign_id"] = f"{t['symbol']}|{campaign_token}"
             t["pnl_abs"] = round(total_pnl, 2) if total_pnl is not None else None
             t["pnl_pct"] = round(grouped_pct, 2) if grouped_pct is not None else None
             campaign_map[t["campaign_id"]] = {"trades": group}
