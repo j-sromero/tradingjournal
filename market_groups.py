@@ -29,12 +29,13 @@ ETF_HINTS = {
 
 _MARKET_GROUPS_TOP10_CACHE = {}
 _MARKET_GROUPS_TOP10_TTL = 300
+# Finviz migrated to a React screener; the old .ashx endpoint still returns
+# server-rendered HTML tables that can be parsed directly.
 _FINVIZ_SCREENER_URL = (
-    "https://finviz.com/screener"
-    "?v=151&p=d"
-    "&f=ind_{industry},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200,tad_0_sma:200:sma:d"
+    "https://finviz.com/screener.ashx"
+    "?v=111"
+    "&f=ind_{industry},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200"
     "&ft=4&o=-perfytd"
-    "&c=0,1,2,4,6,67,65,66,31,49,57,47"
 )
 
 def parse_group_from_href(raw_html, label, debug=False):
@@ -84,6 +85,30 @@ def parse_group_from_href(raw_html, label, debug=False):
         print(f"[parse_group_from_href] deduped tickers for {label}: {out}")
 
     return out
+
+def _parse_finviz_quote_metrics(raw_html):
+    """Extract snapshot metrics from a Finviz stock/quote page (no extra request)."""
+    try:
+        text = BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
+    except Exception:
+        return {}
+
+    def _first(pattern, default="\u2014"):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else default
+
+    return {
+        # Finviz renders these as adjacent text nodes; get_text(" ") puts one space between them.
+        "short_ratio": _first(r'Short\s+Float\s+([\d.]+\s*%)'),
+        "atr":         _first(r'ATR\s*\(\s*14\s*\)\s*([\d.]+)'),
+        "high_52w":    _first(r'52\s*W\s+High\s+([\d.,]+)'),
+        "perf_ytd":    _first(r'Perf\s+YTD\s+([-+]?[\d.]+\s*%)'),
+        # "Volume NNN Perf Week" is the intraday volume; avoids matching "Avg Volume"
+        "volume":      _first(r'\bVolume\s+([\d,]+)\s+Perf\s+Week'),
+        "change":      _first(r'\bChange\s+([-+]?[\d.]+\s*%)'),
+        "price":       _first(r'\bPrice\s+([\d.,]+)\s+Change'),
+    }
+
 
 def fetch_finviz_relations(ticker, debug=False):
     t = (ticker or "").upper().strip()
@@ -162,6 +187,7 @@ def fetch_finviz_relations(ticker, debug=False):
             "ok": True,
             "source": "href_groups",
             "error": None,
+            "metrics": _parse_finviz_quote_metrics(raw_html),
         }
 
         if debug:
@@ -421,11 +447,15 @@ def _is_filter_table(table):
     return False
 
 def _looks_like_result_row(cells):
-    if len(cells) < 12:
+    # v=111 screener returns 11 columns: No., Ticker, Company, Sector,
+    # Industry, Country, Market Cap, P/E, Price, Change, Volume
+    if len(cells) < 11:
         return False
     if not cells[0].isdigit():
         return False
-    ticker = cells[1].strip()
+    # Finviz prefixes the ticker cell with a single coloured letter icon,
+    # e.g. "D DLLL" — extract the real ticker (the last whitespace-separated word).
+    ticker = cells[1].strip().split()[-1] if cells[1].strip() else ""
     if not re.match(r"^[A-Z0-9.\-]{1,10}$", ticker):
         return False
     company = cells[2].strip()
@@ -469,19 +499,24 @@ def fetch_market_group_top10(industry_slug):
             if not _looks_like_result_row(cells):
                 continue
 
+            # v=111 column layout: No.(0) Ticker(1) Company(2) Sector(3)
+            # Industry(4) Country(5) Market Cap(6) P/E(7) Price(8) Change(9) Volume(10)
+            # The Ticker cell contains a coloured-letter icon prefix, e.g. "D DLLL".
+            ticker_raw = cells[1].strip()
+            ticker_clean = ticker_raw.split()[-1] if ticker_raw else ticker_raw
             row = {
                 "rank": int(cells[0]),
-                "ticker": cells[1],
+                "ticker": ticker_clean,
                 "company": cells[2],
-                "industry": cells[3],
-                "market_cap": cells[4],
-                "volume": cells[5],
-                "price": cells[6],
-                "change": cells[7],
-                "short_ratio": cells[8],
-                "atr": cells[9],
-                "high_52w": cells[10],
-                "perf_ytd": cells[11],
+                "industry": cells[4] if len(cells) > 4 else "",
+                "market_cap": cells[6] if len(cells) > 6 else "—",
+                "volume": cells[10] if len(cells) > 10 else "—",
+                "price": cells[8] if len(cells) > 8 else "—",
+                "change": cells[9] if len(cells) > 9 else "—",
+                "short_ratio": "—",
+                "atr": "—",
+                "high_52w": "—",
+                "perf_ytd": "—",
             }
 
             key = (row["rank"], row["ticker"], row["company"], row["perf_ytd"])
@@ -504,6 +539,19 @@ def fetch_market_group_top10(industry_slug):
         row["peers"] = rel.get("peers", []) if rel.get("ok") else []
         row["peers_source"] = rel.get("source")
         row["peers_error"] = rel.get("error")
+        # Enrich with metrics parsed from the quote page (same HTTP response, no
+        # extra network round-trip).  Fill all fields that v=111 doesn't carry,
+        # and override volume/change/price when the screener returned 0/empty.
+        metrics = rel.get("metrics") or {}
+        for field in ("short_ratio", "atr", "high_52w", "perf_ytd"):
+            val = (metrics.get(field) or "").strip()
+            if val and val != "\u2014":
+                row[field] = val
+        for field in ("volume", "change", "price"):
+            val = (metrics.get(field) or "").strip()
+            screener_val = str(row.get(field, "")).strip()
+            if val and val != "\u2014" and screener_val in ("", "0", "0.00%", "\u2014"):
+                row[field] = val
     #graph = build_reciprocal_peer_rankings(tickers)
     #scored_map = graph["scored_map"]
     #reciprocal_map = graph["reciprocal_map"]
