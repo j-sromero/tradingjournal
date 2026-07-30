@@ -23,6 +23,7 @@ from werkzeug.utils import secure_filename
 import numpy as np
 import yfinance as yf
 from market_groups import fetch_finviz_groups_data, fetch_market_group_top10, fetch_finviz_relations
+from finviz_calendar import get_high_importance_days
 
 # ---------- Config ----------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -902,8 +903,14 @@ def streaks(trades_closed):
     return {"current": current, "type": last_type, "longest_win": longest_win,
             "longest_loss": longest_loss, "plan_streak": plan_streak}
 
+def _alert_dismissed(key: str) -> bool:
+    """Return True if this alert key was dismissed today."""
+    val = get_setting(f"alert_dismissed_{key}")
+    return val == date.today().isoformat()
+
+
 def risk_alerts(trades):
-    """Return list of alerts to display."""
+    """Return list of (level, message, dismiss_key) tuples."""
     alerts = []
     today = date.today().isoformat()
     closed = closed_trades(trades)
@@ -916,16 +923,37 @@ def risk_alerts(trades):
     daily_pnl = sum(t["pnl_abs"] for t in today_closed)
     daily_limit_pct = float(get_setting("daily_loss_limit_pct", 2))
     if daily_pnl < 0 and abs(daily_pnl) >= current_capital * daily_limit_pct / 100:
-        alerts.append(("danger", f"⚠️ Daily loss limit hit: ${daily_pnl:.2f} (>{daily_limit_pct}% of ${current_capital:.0f})"))
+        alerts.append(("danger", f"⚠️ Daily loss limit hit: ${daily_pnl:.2f} (>{daily_limit_pct}% of ${current_capital:.0f})", None))
     # max trades per day
     max_trades = int(get_setting("max_trades_per_day", 5))
     if len(today_trades) >= max_trades:
-        alerts.append(("warning", f"📊 You've hit your daily trade limit ({len(today_trades)}/{max_trades}). Consider stepping away."))
+        alerts.append(("warning", f"📊 You've hit your daily trade limit ({len(today_trades)}/{max_trades}). Consider stepping away.", None))
     # consecutive losses
     s = streaks(closed)
     max_loss_streak = int(get_setting("max_consecutive_losses", 3))
     if s["type"] == "loss" and s["current"] >= max_loss_streak:
-        alerts.append(("warning", f"🛑 {s['current']} losses in a row — your max is {max_loss_streak}. Take a break, review, then come back."))
+        if not _alert_dismissed("streak"):
+            alerts.append(("warning", f"🛑 {s['current']} losses in a row — your max is {max_loss_streak}. Take a break, review, then come back.", "streak"))
+    # High-impact economic calendar events
+    try:
+        high_days = get_high_importance_days()
+        today_dt = date.today()
+        for item in high_days:
+            delta = (item["date"] - today_dt).days
+            if delta == 0:
+                label = "today"
+            elif delta == 1:
+                label = "tomorrow"
+            elif delta > 1:
+                label = item["date"].strftime("%A %b %d")
+            else:
+                continue  # past events
+            names = ", ".join(item["events"])
+            cal_key = f"cal_{item['date'].isoformat()}"
+            if not _alert_dismissed(cal_key):
+                alerts.append(("info", f'📅 <a href="https://finviz.com/calendar/economic" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">High-impact macro {label}: {names}</a>', cal_key))
+    except Exception:
+        pass  # never let a calendar fetch break the dashboard
     return alerts
 
 def sync_obsidian_note(t):
@@ -972,6 +1000,15 @@ status: {t['status']}
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return fname
+
+# ---------- Dismiss alert ----------
+@app.route("/dismiss-alert", methods=["POST"])
+def dismiss_alert():
+    key = request.form.get("key", "").strip()
+    if key:
+        set_setting(f"alert_dismissed_{key}", date.today().isoformat())
+    return redirect(url_for("dashboard"))
+
 
 # ---------- Routes: dashboard ----------
 @app.route("/")

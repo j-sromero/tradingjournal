@@ -2,8 +2,16 @@
 {% block content %}
 <h1>Dashboard</h1>
 
-{% for level, msg in alerts %}
-  <div class="flash {{ level }}">{{ msg }}</div>
+{% for level, msg, key in alerts %}
+  <div class="flash {{ level }}">
+    <span>{{ msg | safe }}</span>
+    {% if key %}
+    <form method="post" action="/dismiss-alert" style="margin-left:auto">
+      <input type="hidden" name="key" value="{{ key }}">
+      <button type="submit" class="flash-dismiss" title="Dismiss">✕</button>
+    </form>
+    {% endif %}
+  </div>
 {% endfor %}
 
 

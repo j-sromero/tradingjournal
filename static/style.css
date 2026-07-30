@@ -1011,6 +1011,28 @@ tbody tr:last-child td {
   border-color: rgba(248, 113, 113, 0.4);
 }
 
+.flash.info {
+  background: rgba(99, 179, 237, 0.12);
+  color: #63b3ed;
+  border-color: rgba(99, 179, 237, 0.35);
+}
+
+.flash-dismiss {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  opacity: 0.5;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.flash-dismiss:hover {
+  opacity: 1;
+}
+
 /* ---------- Goal Progress ---------- */
 .month-section {
   background: var(--panel);
