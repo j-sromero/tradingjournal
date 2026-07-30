@@ -115,6 +115,9 @@
             <a href="{{ url_for('trades_list', q=q, status=status, setup=setup, day=selected_day, raw=1, campaign=t.campaign_id, merge_open=merge_open) }}" style="text-decoration:underline; cursor:pointer;">{{ t.group_count }} fills grouped</a>
           </div>
         {% endif %}
+        {% if t.status == 'open' and t.has_partial_reduction and t.has_readd_after_reduction %}
+          <div class="trade-lifecycle-badge">Partially reduced / re-added</div>
+        {% endif %}
       </td>
       <td><span class="badge {{ t.direction }}">{{ t.direction }}</span></td>
       <td>{{ t.entry_price }}</td>

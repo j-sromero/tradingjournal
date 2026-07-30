@@ -669,6 +669,20 @@ tbody tr:last-child td {
   border-color: rgba(148, 163, 184, 0.3);
 }
 
+.trade-lifecycle-badge {
+  margin-top: 0.28rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem 0.48rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
 /* ---------- Forms ---------- */
 .filters {
   display: flex;

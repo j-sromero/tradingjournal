@@ -782,36 +782,99 @@ def trade_campaign_bucket_key(trade):
     )
 
 def build_trade_campaigns(trades):
-    buckets = defaultdict(list)
+    def _symbol(trade):
+        return (trade.get("symbol") or trade.get("ticker") or "").strip().upper()
+
+    def _direction(trade):
+        return (trade.get("direction") or "long").strip().lower()
+
+    def _event_dt(trade):
+        # Closed rows represent reductions/exits, so use exit datetime for ordering when available.
+        if trade.get("status") == "closed" and trade.get("exit_date"):
+            return parse_trade_datetime(trade.get("exit_date")) or datetime.min
+        return parse_trade_datetime(trade.get("entry_date")) or datetime.min
+
+    grouped_streams = defaultdict(list)
     for trade in trades:
-        buckets[trade_campaign_bucket_key(trade)].append(trade)
+        grouped_streams[(_symbol(trade), _direction(trade))].append(trade)
 
     campaigns = []
-    for bucket_key, bucket_trades in buckets.items():
-        ordered = sorted(
-            bucket_trades,
-            key=lambda t: (
-                parse_trade_datetime(t.get("entry_date")) or datetime.min,
-                parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min,
-                t.get("id") or 0,
-            ),
-        )
-        start = min((parse_trade_datetime(t.get("entry_date")) or datetime.min) for t in ordered)
-        end = max((parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min) for t in ordered)
-        symbol, entry_datetime = bucket_key
-        campaigns.append({
-            "campaign_id": "|".join([
-                str(symbol),
-                str(entry_datetime),
-                start.isoformat(),
-                end.isoformat(),
-                "1",
-            ]),
-            "bucket_key": bucket_key,
-            "start": start,
-            "end": end,
-            "trades": ordered,
-        })
+    for (symbol, direction), stream in grouped_streams.items():
+        ordered_stream = sorted(stream, key=lambda t: (_event_dt(t), t.get("id") or 0))
+
+        active = None
+        active_open_qty = 0.0
+        campaign_index = 0
+
+        def _finalize_active():
+            if not active or not active.get("trades"):
+                return
+            ordered = sorted(
+                active["trades"],
+                key=lambda t: (
+                    parse_trade_datetime(t.get("entry_date")) or datetime.min,
+                    parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min,
+                    t.get("id") or 0,
+                ),
+            )
+            start = min((parse_trade_datetime(t.get("entry_date")) or datetime.min) for t in ordered)
+            end = max((parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min) for t in ordered)
+            campaigns.append({
+                "campaign_id": "|".join([
+                    str(symbol),
+                    str(direction),
+                    start.isoformat(),
+                    end.isoformat(),
+                    str(active["idx"]),
+                ]),
+                "bucket_key": (symbol, direction, active["idx"]),
+                "start": start,
+                "end": end,
+                "trades": ordered,
+            })
+
+        for trade in ordered_stream:
+            qty = float(trade.get("size") or 0)
+            status = (trade.get("status") or "open").lower()
+
+            if status == "open":
+                if active is None:
+                    campaign_index += 1
+                    active = {"idx": campaign_index, "trades": []}
+                    active_open_qty = 0.0
+                active["trades"].append(trade)
+                active_open_qty += max(qty, 0.0)
+                continue
+
+            if status == "closed":
+                if active is None or active_open_qty <= 0:
+                    # Standalone closed row (already opened+closed in a single fill/campaign row).
+                    campaign_index += 1
+                    active = {"idx": campaign_index, "trades": [trade]}
+                    _finalize_active()
+                    active = None
+                    active_open_qty = 0.0
+                    continue
+
+                active["trades"].append(trade)
+                active_open_qty = max(0.0, active_open_qty - max(qty, 0.0))
+                if active_open_qty <= 0:
+                    _finalize_active()
+                    active = None
+                    active_open_qty = 0.0
+                continue
+
+            # Unknown status: isolate as its own campaign to avoid accidental merges.
+            campaign_index += 1
+            isolated = {"idx": campaign_index, "trades": [trade]}
+            active_backup, qty_backup = active, active_open_qty
+            active, active_open_qty = isolated, 0.0
+            _finalize_active()
+            active, active_open_qty = active_backup, qty_backup
+
+        if active is not None and active.get("trades"):
+            _finalize_active()
+
     campaigns.sort(key=lambda c: c["start"], reverse=True)
     return campaigns
 
@@ -819,25 +882,61 @@ def aggregate_trade_campaign(campaign):
     grouped_trades = campaign["trades"]
     first = dict(grouped_trades[0])
 
-    total_size = sum((trade.get("size") or 0) for trade in grouped_trades)
-    total_fees = sum((trade.get("fees") or 0) for trade in grouped_trades)
-    entry_notional = sum((trade.get("entry_price") or 0) * (trade.get("size") or 0) for trade in grouped_trades)
-    exit_size = sum((trade.get("size") or 0) for trade in grouped_trades if trade.get("exit_price") is not None)
-    exit_notional = sum((trade.get("exit_price") or 0) * (trade.get("size") or 0) for trade in grouped_trades if trade.get("exit_price") is not None)
+    open_rows = [t for t in grouped_trades if (t.get("status") or "").lower() == "open"]
+    closed_rows = [t for t in grouped_trades if (t.get("status") or "").lower() == "closed" and t.get("exit_price") is not None]
+
+    opened_size = sum(float(trade.get("size") or 0) for trade in open_rows)
+    closed_size = sum(float(trade.get("size") or 0) for trade in closed_rows)
+    net_open_size = max(0.0, opened_size - closed_size)
+    campaign_status = "open" if net_open_size > 0 else "closed"
+
+    has_partial_reduction = bool(open_rows and closed_rows)
+    first_reduction_dt = min(
+        (
+            parse_trade_datetime(t.get("exit_date") or t.get("entry_date"))
+            for t in closed_rows
+            if parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) is not None
+        ),
+        default=None,
+    )
+    has_readd_after_reduction = bool(
+        first_reduction_dt
+        and any(
+            (parse_trade_datetime(t.get("entry_date")) or datetime.min) > first_reduction_dt
+            for t in open_rows
+        )
+    )
+
+    total_fees = sum(float(trade.get("fees") or 0) for trade in grouped_trades)
+
+    # Use open rows for entry basis when available; fallback to all rows for standalone closed fills.
+    entry_basis_rows = open_rows if open_rows else grouped_trades
+    entry_basis_size = sum(float(trade.get("size") or 0) for trade in entry_basis_rows)
+    entry_notional = sum(float(trade.get("entry_price") or 0) * float(trade.get("size") or 0) for trade in entry_basis_rows)
+
+    exit_size = sum(float(trade.get("size") or 0) for trade in closed_rows)
+    exit_notional = sum(float(trade.get("exit_price") or 0) * float(trade.get("size") or 0) for trade in closed_rows)
 
     aggregated = dict(first)
-    aggregated["size"] = round(total_size, 4)
+    aggregated["status"] = campaign_status
+    aggregated["size"] = round(net_open_size if campaign_status == "open" else exit_size, 4)
     aggregated["fees"] = round(total_fees, 4)
-    aggregated["entry_price"] = round(entry_notional / total_size, 4) if total_size else first.get("entry_price")
-    aggregated["exit_price"] = round(exit_notional / exit_size, 4) if exit_size else None
+    aggregated["entry_price"] = round(entry_notional / entry_basis_size, 4) if entry_basis_size else first.get("entry_price")
+    aggregated["exit_price"] = round(exit_notional / exit_size, 4) if (campaign_status == "closed" and exit_size) else None
     aggregated["entry_date"] = min((trade.get("entry_date") or "") for trade in grouped_trades if trade.get("entry_date")) or first.get("entry_date")
-    aggregated["exit_date"] = max((trade.get("exit_date") or "") for trade in grouped_trades if trade.get("exit_date")) if any(trade.get("exit_date") for trade in grouped_trades) else None
+    aggregated["exit_date"] = (
+        max((trade.get("exit_date") or "") for trade in grouped_trades if trade.get("exit_date"))
+        if (campaign_status == "closed" and any(trade.get("exit_date") for trade in grouped_trades))
+        else None
+    )
     aggregated["stop_loss"] = first.get("stop_loss") if all(trade.get("stop_loss") == first.get("stop_loss") for trade in grouped_trades) else None
     aggregated["take_profit"] = first.get("take_profit") if all(trade.get("take_profit") == first.get("take_profit") for trade in grouped_trades) else None
     aggregated["group_count"] = len(grouped_trades)
     aggregated["is_grouped"] = len(grouped_trades) > 1
     aggregated["group_ids"] = [trade["id"] for trade in grouped_trades]
     aggregated["campaign_id"] = campaign["campaign_id"]
+    aggregated["has_partial_reduction"] = has_partial_reduction
+    aggregated["has_readd_after_reduction"] = has_readd_after_reduction
 
     pnl_abs, pnl_pct, r_mult = calc_pnl(aggregated)
     aggregated["pnl_abs"] = pnl_abs
@@ -944,10 +1043,8 @@ def risk_alerts(trades):
                 label = "today"
             elif delta == 1:
                 label = "tomorrow"
-            elif delta > 1:
-                label = item["date"].strftime("%A %b %d")
             else:
-                continue  # past events
+                label = item["date"].strftime("%A %b %d")
             names = ", ".join(item["events"])
             cal_key = f"cal_{item['date'].isoformat()}"
             if not _alert_dismissed(cal_key):
@@ -1678,67 +1775,19 @@ def v3_trades_list():
     source_trade_map = {int(r["id"]): _to_trade_row(r) for r in rows_unmerged}
     rows = _merge_open_trades(rows_unmerged) if merge_open else rows_unmerged
 
-    # Group v3 trades by symbol and entry_datetime
-    trade_rows = []
-    for r in rows:
-        trade_rows.append(_to_trade_row(r))
-
-    # Group closed rows by shared exit timestamp (same symbol) to merge split entries
-    # that are closed together; keep open rows keyed by entry timestamp.
-    from collections import defaultdict
-    grouped = defaultdict(list)
-
-    def _group_key(t):
-        symbol = t["symbol"]
-        exit_dt = t.get("exit_date")
-        if exit_dt:
-            return (symbol, "closed", exit_dt)
-        return (symbol, "open", t.get("entry_datetime"))
-
+    # Build campaigns using shared lifecycle grouping logic (supports trims + re-adds).
+    trade_rows = [_to_trade_row(r) for r in rows]
     for t in trade_rows:
-        grouped[_group_key(t)].append(t)
+        t["ticker"] = t.get("symbol")
+
+    campaigns = build_trade_campaigns(trade_rows)
+    campaign_map = {campaign["campaign_id"]: campaign for campaign in campaigns}
 
     trades = []
-    campaign_map = {}
-    for group in grouped.values():
-        if len(group) == 1:
-            t = dict(group[0])
-            t["is_grouped"] = False
-            t["group_count"] = 1
-            t["ticker"] = t.get("symbol")
-            trades.append(t)
-        else:
-            first = group[0]
-            total_size = sum(tr["size"] for tr in group)
-            entry_notional = sum(tr["entry_price"] * tr["size"] for tr in group)
-            exit_size = sum(tr["size"] for tr in group if tr["exit_price"] is not None)
-            exit_notional = sum((tr["exit_price"] or 0) * tr["size"] for tr in group if tr["exit_price"] is not None)
-            fees = sum(tr["fees"] for tr in group)
-            entry_date = min(tr["entry_date"] for tr in group if tr["entry_date"])
-            exit_date = max(tr["exit_date"] for tr in group if tr["exit_date"])
-            total_pnl = sum(
-                ((tr["exit_price"] or 0) - (tr["entry_price"] or 0)) * (tr["size"] or 0) - (tr.get("fees") or 0)
-                for tr in group if tr["exit_price"] is not None
-            )
-            total_entry_notional = sum(abs((tr["entry_price"] or 0) * (tr["size"] or 0)) for tr in group)
-            grouped_pct = (total_pnl / total_entry_notional * 100) if total_entry_notional else None
-            t = dict(first)
-            t["size"] = total_size
-            t["fees"] = fees
-            t["entry_price"] = round(entry_notional / total_size, 4) if total_size else first["entry_price"]
-            t["exit_price"] = round(exit_notional / exit_size, 4) if exit_size else None
-            t["entry_date"] = entry_date
-            t["exit_date"] = exit_date
-            t["is_grouped"] = True
-            t["group_count"] = len(group)
-            t["group_ids"] = [tr["id"] for tr in group]
-            t["ticker"] = t.get("symbol")
-            campaign_token = t.get("exit_date") or t.get("entry_datetime") or ""
-            t["campaign_id"] = f"{t['symbol']}|{campaign_token}"
-            t["pnl_abs"] = round(total_pnl, 2) if total_pnl is not None else None
-            t["pnl_pct"] = round(grouped_pct, 2) if grouped_pct is not None else None
-            campaign_map[t["campaign_id"]] = {"trades": group}
-            trades.append(t)
+    for campaign in campaigns:
+        aggregated = aggregate_trade_campaign(campaign)
+        aggregated["ticker"] = aggregated.get("ticker") or aggregated.get("symbol")
+        trades.append(aggregated)
 
     # Support raw (fills) view for grouped trades
     show_individual = request.args.get("raw") == "1"
