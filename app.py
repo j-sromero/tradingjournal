@@ -1550,7 +1550,7 @@ def v3_trades_list():
     conn = sqlite3.connect(V3_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        sql = "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission FROM trades WHERE 1=1"
+        sql = "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction FROM trades WHERE 1=1"
         params = []
 
         if q:
@@ -1632,7 +1632,8 @@ def v3_trades_list():
         pnl_abs = None
         pnl_pct = None
         if exit_price is not None:
-            pnl_abs = (exit_price - entry_price) * size - fees
+            direction_sign = -1 if (r.get("direction") or "long") == "short" else 1
+            pnl_abs = (exit_price - entry_price) * size * direction_sign - fees
             cost = entry_price * size
             pnl_pct = (pnl_abs / cost * 100) if cost else None
 
@@ -1644,7 +1645,7 @@ def v3_trades_list():
             "id": int(r["id"]),
             "symbol": r["symbol"],
             "entry_datetime": r["entry_datetime"],
-            "direction": "long",
+            "direction": r.get("direction") or "long",
             "entry_date": entry_iso,
             "exit_date": exit_iso,
             "entry_price": round(entry_price, 2),
