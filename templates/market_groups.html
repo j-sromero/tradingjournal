@@ -971,7 +971,7 @@
       const tickerSlug = String(row?.ticker_slug ?? '');
       const screenerPath = String(row?.screener_url ?? '');
       const screenerHref = tickerSlug
-        ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&o=-perfytd&c=0,1,2,4,6,67,65,66,31,49,57,47`
+        ? `https://finviz.com/screener?v=151&p=d&f=ind_${encodeURIComponent(tickerSlug)},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200,tad_0_sma:200:sma:d&ft=4&o=-perfytd&c=0,1,2,4,6,63,65,66,31,49,57,47`
         : 'https://finviz.com/groups.ashx';
       const mainValue = Number(row?.[currentKey]);
 
@@ -1778,7 +1778,7 @@
               <span class="pop-metric-v">${escapeHtml(r.market_cap ?? '—')}</span>
             </div>
             <div class="pop-metric">
-              <span class="pop-metric-k">Volume</span>
+              <span class="pop-metric-k">Avg Volume</span>
               <span class="pop-metric-v">${escapeHtml(r.volume ?? '—')}</span>
             </div>
             <div class="pop-metric">

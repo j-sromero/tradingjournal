@@ -1686,15 +1686,26 @@ def v3_trades_list():
 
     # Group closed rows by shared exit timestamp (same symbol) to merge split entries
     # that are closed together; keep open rows keyed by entry timestamp.
+    # If a campaign still has an open remainder, attach matching closed trims to the
+    # same entry-timestamp bucket so one campaign appears as a single row.
     from collections import defaultdict
     grouped = defaultdict(list)
 
+    open_campaign_keys = {
+        (t["symbol"], t.get("entry_datetime"))
+        for t in trade_rows
+        if t.get("status") == "open" and t.get("entry_datetime")
+    }
+
     def _group_key(t):
         symbol = t["symbol"]
+        entry_dt = t.get("entry_datetime")
+        if (symbol, entry_dt) in open_campaign_keys:
+            return (symbol, "campaign", entry_dt)
         exit_dt = t.get("exit_date")
         if exit_dt:
             return (symbol, "closed", exit_dt)
-        return (symbol, "open", t.get("entry_datetime"))
+        return (symbol, "open", entry_dt)
 
     for t in trade_rows:
         grouped[_group_key(t)].append(t)
@@ -1710,33 +1721,43 @@ def v3_trades_list():
             trades.append(t)
         else:
             first = group[0]
-            total_size = sum(tr["size"] for tr in group)
-            entry_notional = sum(tr["entry_price"] * tr["size"] for tr in group)
-            exit_size = sum(tr["size"] for tr in group if tr["exit_price"] is not None)
-            exit_notional = sum((tr["exit_price"] or 0) * tr["size"] for tr in group if tr["exit_price"] is not None)
-            fees = sum(tr["fees"] for tr in group)
-            entry_date = min(tr["entry_date"] for tr in group if tr["entry_date"])
-            exit_date = max(tr["exit_date"] for tr in group if tr["exit_date"])
+            open_members = [tr for tr in group if tr.get("status") == "open" or tr.get("exit_price") is None]
+            closed_members = [tr for tr in group if tr.get("exit_price") is not None]
+
+            active_members = open_members if open_members else group
+            total_size = sum((tr.get("size") or 0) for tr in active_members)
+            entry_notional = sum((tr.get("entry_price") or 0) * (tr.get("size") or 0) for tr in active_members)
+            fees = sum((tr.get("fees") or 0) for tr in group)
+            entry_date = min((tr["entry_date"] for tr in group if tr["entry_date"]), default=first.get("entry_date"))
+
+            exit_size = sum((tr.get("size") or 0) for tr in closed_members)
+            exit_notional = sum((tr.get("exit_price") or 0) * (tr.get("size") or 0) for tr in closed_members)
+            exit_date = max((tr["exit_date"] for tr in closed_members if tr.get("exit_date")), default=None)
+
             total_pnl = sum(
-                ((tr["exit_price"] or 0) - (tr["entry_price"] or 0)) * (tr["size"] or 0) - (tr.get("fees") or 0)
-                for tr in group if tr["exit_price"] is not None
+                ((tr.get("exit_price") or 0) - (tr.get("entry_price") or 0)) * (tr.get("size") or 0) - (tr.get("fees") or 0)
+                for tr in closed_members
             )
-            total_entry_notional = sum(abs((tr["entry_price"] or 0) * (tr["size"] or 0)) for tr in group)
+            total_entry_notional = sum(abs((tr.get("entry_price") or 0) * (tr.get("size") or 0)) for tr in closed_members)
             grouped_pct = (total_pnl / total_entry_notional * 100) if total_entry_notional else None
+
+            has_open_remainder = bool(open_members)
+
             t = dict(first)
             t["size"] = total_size
             t["fees"] = fees
             t["entry_price"] = round(entry_notional / total_size, 4) if total_size else first["entry_price"]
-            t["exit_price"] = round(exit_notional / exit_size, 4) if exit_size else None
+            t["exit_price"] = None if has_open_remainder else (round(exit_notional / exit_size, 4) if exit_size else None)
             t["entry_date"] = entry_date
-            t["exit_date"] = exit_date
+            t["exit_date"] = None if has_open_remainder else exit_date
+            t["status"] = "open" if has_open_remainder else "closed"
             t["is_grouped"] = True
             t["group_count"] = len(group)
             t["group_ids"] = [tr["id"] for tr in group]
             t["ticker"] = t.get("symbol")
-            campaign_token = t.get("exit_date") or t.get("entry_datetime") or ""
+            campaign_token = t.get("entry_datetime") if has_open_remainder else (t.get("exit_date") or t.get("entry_datetime") or "")
             t["campaign_id"] = f"{t['symbol']}|{campaign_token}"
-            t["pnl_abs"] = round(total_pnl, 2) if total_pnl is not None else None
+            t["pnl_abs"] = round(total_pnl, 2) if closed_members else None
             t["pnl_pct"] = round(grouped_pct, 2) if grouped_pct is not None else None
             campaign_map[t["campaign_id"]] = {"trades": group}
             trades.append(t)
