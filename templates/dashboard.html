@@ -159,7 +159,7 @@
         </td>
         <td>{{ ('%.2f%%' % t.pnl_pct) if t.pnl_pct is not none else '—' }}</td>
         <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
-        <td><a href="{{ url_for('trade_detail', tid=t.id) }}">view</a></td>
+        <td><a href="{{ url_for('v3_chart_view', trade_id=t.id) }}">chart</a></td>
       </tr>
     {% endfor %}
     </tbody>

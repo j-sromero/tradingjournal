@@ -19,15 +19,14 @@
       <a href="{{ url_for('v3_trades_list') }}">Trades</a>
       <a href="{{ url_for('analytics') }}">Analytics</a>
       <a href="{{ url_for('calendar_view') }}">Calendar</a>
-      <a href="{{ url_for('playbook') }}">Playbook</a>
       <a href="{{ url_for('v3_import') }}">IBKR Import</a>
       <div class="dropdown" id="nav-dropdown">
         <a href="#" class="btn dropdown-toggle" id="dropdownToggle" tabindex="0" aria-haspopup="true"
           aria-expanded="false">⋯</a>
         <div class="dropdown-menu" id="dropdownMenu">
           <a href="{{ url_for('settings') }}">⚙️ Settings</a>
-          <a href="{{ url_for('import_csv') }}">📥 Import CSV</a>
           <a href="{{ url_for('interest_history') }}">📊 Interest History</a>
+          <a href="{{ url_for('import_csv') }}">📥 Import Interest</a>
           <a href="{{ url_for('export_csv') }}">📤 Export CSV</a>
           <a href="{{ url_for('backup_zip') }}">💾 Backup .zip</a>
           <a href="#" id="toggle-theme">🌗 Toggle theme</a>

@@ -1419,49 +1419,6 @@ tbody tr:last-child td {
   color: var(--text);
 }
 
-/* ---------- Replay ----------
-.replay-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 1.25rem;
-  padding: 1rem;
-  background: var(--panel2);
-  border-radius: 10px;
-}
-
-.replay-controls input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  height: 6px;
-  background: var(--border-strong);
-  border-radius: 999px;
-  outline: none;
-}
-
-.replay-controls input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
-  background: var(--primary);
-  border-radius: 50%;
-  cursor: pointer;
-  box-shadow: 0 0 10px var(--primary-glow);
-  transition: transform 0.15s ease;
-}
-
-.replay-controls input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
-}
-
-.replay-info {
-  margin-top: 1rem;
-  padding: 0.85rem 1rem;
-  background: var(--panel2);
-  border-radius: 8px;
-  border-left: 3px solid var(--primary);
-} */
-
 /* ---------- Keyboard / Shortcuts ---------- */
 kbd {
   background: var(--panel-solid);
@@ -1904,44 +1861,4 @@ input[type=number]::-webkit-inner-spin-button {
 input[type=number] {
   -moz-appearance: textfield;
 }
-
-/*3 elements per row in playbook*/
-
-.playbook-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 2em;
-}
-
-/* Responsive: stack cards on small screens */
-@media (max-width: 1100px) {
-
-  /* adjust as desired */
-  .playbook-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (max-width: 700px) {
-  .playbook-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-#playbook-filter input,
-#playbook-filter select {
-  padding: 0.4em 0.7em;
-  font-size: 1em;
-  border-radius: 6px;
-  border: 1px solid var(--border-strong, #485);
-  background: var(--panel-solid, #11182b);
-  color: var(--muted, #eef);
-  margin-left: 8px;
-}
-
-#playbook-filter label {
-  font-weight: 500;
-  color: var(--muted, #eef);
-}
-
 
