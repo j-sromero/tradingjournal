@@ -107,6 +107,7 @@ def aggregate_closed_trades(closed_rows):
                 "exit_price": round(exit_price, 6),
                 "quantity": sum(x["quantity"] for x in group),
                 "ib_commission": round(ib_commission, 6),
+                "direction": group[0].get("direction", "long"),
             })
     return aggregated
 
@@ -123,7 +124,8 @@ def init_db(db_path: str) -> None:
                 entry_price REAL NOT NULL,
                 exit_price REAL,
                 quantity REAL NOT NULL,
-                ib_commission REAL NOT NULL
+                ib_commission REAL NOT NULL,
+                direction TEXT NOT NULL DEFAULT 'long'
             )
             """
         )
@@ -133,6 +135,9 @@ def init_db(db_path: str) -> None:
             raise SystemExit("Schema mismatch: trades.exit_datetime is NOT NULL. Delete journal_v3.db and rerun.")
         if "exit_price" in cols and cols["exit_price"][3] == 1:
             raise SystemExit("Schema mismatch: trades.exit_price is NOT NULL. Delete journal_v3.db and rerun.")
+        # Migrate: add direction column if missing (existing DBs)
+        if "direction" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'")
         conn.commit()
     finally:
         conn.close()
@@ -334,7 +339,8 @@ def build_trade_rows(rows):
 
     for symbol, fills in by_symbol.items():
         fills.sort(key=lambda x: x["datetime"])
-        open_lots = deque()  # each: qty, entry_datetime, entry_price, comm_remaining
+        long_lots = deque()   # opened by buys (qty > 0)
+        short_lots = deque()  # opened by sells (qty < 0) when no long lots to close
         raw_closures = []
 
         for f in fills:
@@ -343,50 +349,113 @@ def build_trade_rows(rows):
                 continue
 
             if qty > 0:
-                open_lots.append(
+                # Buy: either close existing short lots FIFO, or open a new long lot
+                if short_lots:
+                    to_close = qty
+                    close_comm_total = f["ib_commission"]
+                    while to_close > 1e-12 and short_lots:
+                        lot = short_lots[0]
+                        match_qty = min(lot["qty"], to_close)
+
+                        entry_comm_alloc = 0.0
+                        if lot["qty"] > 0:
+                            entry_comm_alloc = lot["comm_remaining"] * (match_qty / lot["qty"])
+                        exit_comm_alloc = close_comm_total * (match_qty / qty) if qty > 0 else 0.0
+
+                        closure = {
+                            "symbol": symbol,
+                            "entry_datetime": lot["entry_datetime"],
+                            "entry_price": r2(lot["entry_price"]),
+                            "exit_datetime": f["datetime"],
+                            "exit_price": r2(f["trade_price"]),
+                            "quantity": r2(match_qty),
+                            "ib_commission": r2(entry_comm_alloc + exit_comm_alloc),
+                            "direction": "short",
+                        }
+                        raw_closures.append(closure)
+
+                        lot["had_close"] = True
+                        lot["qty"] -= match_qty
+                        lot["comm_remaining"] -= entry_comm_alloc
+                        to_close -= match_qty
+                        if lot["qty"] <= 1e-12:
+                            short_lots.popleft()
+
+                    # Any leftover qty (overshoot) opens a new long lot
+                    if to_close > 1e-12:
+                        long_lots.append({
+                            "qty": to_close,
+                            "entry_datetime": f["datetime"],
+                            "entry_price": f["trade_price"],
+                            "comm_remaining": f["ib_commission"] * (to_close / qty),
+                            "had_close": False,
+                        })
+                else:
+                    long_lots.append(
+                        {
+                            "qty": qty,
+                            "entry_datetime": f["datetime"],
+                            "entry_price": f["trade_price"],
+                            "comm_remaining": f["ib_commission"],
+                            "had_close": False,
+                        }
+                    )
+                continue
+
+            # qty < 0: either close existing long lots FIFO, or open a new short lot
+            if long_lots:
+                to_close = abs(qty)
+                close_comm_total = f["ib_commission"]
+                while to_close > 1e-12 and long_lots:
+                    lot = long_lots[0]
+                    match_qty = min(lot["qty"], to_close)
+
+                    entry_comm_alloc = 0.0
+                    if lot["qty"] > 0:
+                        entry_comm_alloc = lot["comm_remaining"] * (match_qty / lot["qty"])
+                    exit_comm_alloc = close_comm_total * (match_qty / abs(qty)) if abs(qty) > 0 else 0.0
+
+                    closure = {
+                        "symbol": symbol,
+                        "entry_datetime": lot["entry_datetime"],
+                        "entry_price": r2(lot["entry_price"]),
+                        "exit_datetime": f["datetime"],
+                        "exit_price": r2(f["trade_price"]),
+                        "quantity": r2(match_qty),
+                        "ib_commission": r2(entry_comm_alloc + exit_comm_alloc),
+                        "direction": "long",
+                    }
+                    raw_closures.append(closure)
+
+                    lot["had_close"] = True
+                    lot["qty"] -= match_qty
+                    lot["comm_remaining"] -= entry_comm_alloc
+                    to_close -= match_qty
+                    if lot["qty"] <= 1e-12:
+                        long_lots.popleft()
+
+                # Any leftover qty (overshoot) opens a new short lot
+                if to_close > 1e-12:
+                    short_lots.append({
+                        "qty": to_close,
+                        "entry_datetime": f["datetime"],
+                        "entry_price": f["trade_price"],
+                        "comm_remaining": f["ib_commission"] * (to_close / abs(qty)),
+                        "had_close": False,
+                    })
+            else:
+                # No open longs -> this is a short sale
+                short_lots.append(
                     {
-                        "qty": qty,
+                        "qty": abs(qty),
                         "entry_datetime": f["datetime"],
                         "entry_price": f["trade_price"],
                         "comm_remaining": f["ib_commission"],
                         "had_close": False,
                     }
                 )
-                continue
 
-            # qty < 0 -> close existing long lots FIFO
-            to_close = abs(qty)
-            close_comm_total = f["ib_commission"]
-            while to_close > 1e-12 and open_lots:
-                lot = open_lots[0]
-                match_qty = min(lot["qty"], to_close)
-
-                entry_comm_alloc = 0.0
-                if lot["qty"] > 0:
-                    entry_comm_alloc = lot["comm_remaining"] * (match_qty / lot["qty"])
-                exit_comm_alloc = close_comm_total * (match_qty / abs(qty)) if abs(qty) > 0 else 0.0
-
-                closure = {
-                    "symbol": symbol,
-                    "entry_datetime": lot["entry_datetime"],
-                    "entry_price": r2(lot["entry_price"]),
-                    "exit_datetime": f["datetime"],
-                    "exit_price": r2(f["trade_price"]),
-                    "quantity": r2(match_qty),
-                    "ib_commission": r2(entry_comm_alloc + exit_comm_alloc),
-                }
-                raw_closures.append(closure)
-
-                # Mark lot as partially/fully matched by a closing fill.
-                lot["had_close"] = True
-                lot["qty"] -= match_qty
-                lot["comm_remaining"] -= entry_comm_alloc
-                to_close -= match_qty
-                if lot["qty"] <= 1e-12:
-                    open_lots.popleft()
-
-
-        for lot in open_lots:
+        for lot in long_lots:
             if lot["qty"] <= 1e-12:
                 continue
             open_row = {
@@ -397,6 +466,23 @@ def build_trade_rows(rows):
                 "exit_price": None,
                 "quantity": r2(lot["qty"]),
                 "ib_commission": r2(max(0.0, lot["comm_remaining"])),
+                "direction": "long",
+                "_from_partial_close": bool(lot.get("had_close")),
+            }
+            open_rows.append(open_row)
+
+        for lot in short_lots:
+            if lot["qty"] <= 1e-12:
+                continue
+            open_row = {
+                "symbol": symbol,
+                "entry_datetime": lot["entry_datetime"],
+                "exit_datetime": None,
+                "entry_price": r2(lot["entry_price"]),
+                "exit_price": None,
+                "quantity": r2(lot["qty"]),
+                "ib_commission": r2(max(0.0, lot["comm_remaining"])),
+                "direction": "short",
                 "_from_partial_close": bool(lot.get("had_close")),
             }
             open_rows.append(open_row)
@@ -567,8 +653,8 @@ def insert_trades(db_path: str, rows):
                         cur = conn.execute(
                             """
                             INSERT INTO trades
-                            (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 r["symbol"],
@@ -578,6 +664,7 @@ def insert_trades(db_path: str, rows):
                                 r["exit_price"],
                                 r["quantity"],
                                 r["ib_commission"],
+                                r.get("direction", "long"),
                             ),
                         )
                         inserted += cur.rowcount
@@ -661,8 +748,8 @@ def insert_trades(db_path: str, rows):
                 cur = conn.execute(
                     """
                     INSERT INTO trades
-                    (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         r["symbol"],
@@ -672,6 +759,7 @@ def insert_trades(db_path: str, rows):
                         r["exit_price"],
                         r["quantity"],
                         r["ib_commission"],
+                        r.get("direction", "long"),
                     ),
                 )
                 inserted += cur.rowcount

@@ -29,13 +29,13 @@ ETF_HINTS = {
 
 _MARKET_GROUPS_TOP10_CACHE = {}
 _MARKET_GROUPS_TOP10_TTL = 300
-# Finviz migrated to a React screener; the old .ashx endpoint still returns
-# server-rendered HTML tables that can be parsed directly.
 _FINVIZ_SCREENER_URL = (
-    "https://finviz.com/screener.ashx"
-    "?v=111"
+    "https://finviz.com/screener"
+    "?v=151&p=d"
     "&f=ind_{industry},sh_avgvol_o500,sh_price_o10,ta_sma200_pa,ta_sma50_sa200"
+    ",tad_0_sma:200:sma:d"
     "&ft=4&o=-perfytd"
+    "&c=0,1,2,4,6,63,65,66,31,49,57,47"
 )
 
 def parse_group_from_href(raw_html, label, debug=False):
@@ -102,10 +102,12 @@ def _parse_finviz_quote_metrics(raw_html):
         "short_ratio": _first(r'Short\s+Float\s+([\d.]+\s*%)'),
         "atr":         _first(r'ATR\s*\(\s*14\s*\)\s*([\d.]+)'),
         "high_52w":    _first(r'52\s*W\s+High\s+([\d.,]+)'),
-        "perf_ytd":    _first(r'Perf\s+YTD\s+([-+]?[\d.]+\s*%)'),
-        # "Volume NNN Perf Week" is the intraday volume; avoids matching "Avg Volume"
+        "perf_ytd":    _first(r'Perf\s+YTD\s+([-+]?\d[\d.,]*\s*%)'),
+        # Avg Volume is the trailing 3-month average. Keep this distinct from
+        # intraday volume, which is represented by the "Volume ... Perf Week" field.
+        "avg_volume":  _first(r'Avg\s+Volume\s+([\d.,]+\s*[KMBT]?)'),
         "volume":      _first(r'\bVolume\s+([\d,]+)\s+Perf\s+Week'),
-        "change":      _first(r'\bChange\s+([-+]?[\d.]+\s*%)'),
+        "change":      _first(r'\bChange\s+([-+]?\d[\d.,]*\s*%)'),
         "price":       _first(r'\bPrice\s+([\d.,]+)\s+Change'),
     }
 
@@ -447,9 +449,9 @@ def _is_filter_table(table):
     return False
 
 def _looks_like_result_row(cells):
-    # v=111 screener returns 11 columns: No., Ticker, Company, Sector,
-    # Industry, Country, Market Cap, P/E, Price, Change, Volume
-    if len(cells) < 11:
+    # v=151 custom layout: No., Ticker, Company, Industry, Market Cap,
+    # Avg Volume, Price, Change, Short Ratio, ATR, 52W High, Perf YTD.
+    if len(cells) < 12:
         return False
     if not cells[0].isdigit():
         return False
@@ -499,8 +501,7 @@ def fetch_market_group_top10(industry_slug):
             if not _looks_like_result_row(cells):
                 continue
 
-            # v=111 column layout: No.(0) Ticker(1) Company(2) Sector(3)
-            # Industry(4) Country(5) Market Cap(6) P/E(7) Price(8) Change(9) Volume(10)
+            # v=151 custom column layout from _FINVIZ_SCREENER_URL.
             # The Ticker cell contains a coloured-letter icon prefix, e.g. "D DLLL".
             ticker_raw = cells[1].strip()
             ticker_clean = ticker_raw.split()[-1] if ticker_raw else ticker_raw
@@ -508,15 +509,15 @@ def fetch_market_group_top10(industry_slug):
                 "rank": int(cells[0]),
                 "ticker": ticker_clean,
                 "company": cells[2],
-                "industry": cells[4] if len(cells) > 4 else "",
-                "market_cap": cells[6] if len(cells) > 6 else "—",
-                "volume": cells[10] if len(cells) > 10 else "—",
-                "price": cells[8] if len(cells) > 8 else "—",
-                "change": cells[9] if len(cells) > 9 else "—",
-                "short_ratio": "—",
-                "atr": "—",
-                "high_52w": "—",
-                "perf_ytd": "—",
+                "industry": cells[3],
+                "market_cap": cells[4],
+                "volume": cells[5],
+                "price": cells[6],
+                "change": cells[7],
+                "short_ratio": cells[8],
+                "atr": cells[9],
+                "high_52w": cells[10],
+                "perf_ytd": cells[11],
             }
 
             key = (row["rank"], row["ticker"], row["company"], row["perf_ytd"])
@@ -540,14 +541,17 @@ def fetch_market_group_top10(industry_slug):
         row["peers_source"] = rel.get("source")
         row["peers_error"] = rel.get("error")
         # Enrich with metrics parsed from the quote page (same HTTP response, no
-        # extra network round-trip).  Fill all fields that v=111 doesn't carry,
+        # extra network round-trip). Fill all fields that v=111 doesn't carry,
         # and override volume/change/price when the screener returned 0/empty.
         metrics = rel.get("metrics") or {}
         for field in ("short_ratio", "atr", "high_52w", "perf_ytd"):
             val = (metrics.get(field) or "").strip()
             if val and val != "\u2014":
                 row[field] = val
-        for field in ("volume", "change", "price"):
+        avg_volume = (metrics.get("avg_volume") or "").strip()
+        if avg_volume and avg_volume != "\u2014":
+            row["volume"] = avg_volume
+        for field in ("change", "price"):
             val = (metrics.get(field) or "").strip()
             screener_val = str(row.get(field, "")).strip()
             if val and val != "\u2014" and screener_val in ("", "0", "0.00%", "\u2014"):

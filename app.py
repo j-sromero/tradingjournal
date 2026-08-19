@@ -27,7 +27,6 @@ from finviz_calendar import get_high_importance_days
 
 # ---------- Config ----------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "journal.db")
 V3_DB_PATH = os.path.join(BASE_DIR, "journal_v3.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
 OBSIDIAN_NOTES_DIR = os.path.join(BASE_DIR, "obsidian_notes")
@@ -100,12 +99,24 @@ def _run_yf_with_invalid_crumb_retry(fn, retries: int = 2, base_delay: float = 0
         raise last_exc
     raise RuntimeError("Unexpected yfinance retry state")
 
+def compact_dt_to_iso(val):
+    """journal_v3 stores timestamps as YYYYMMDDHHMM; render them as ISO."""
+    text = str(val or "").strip()
+    if len(text) >= 12 and text[:12].isdigit():
+        return f"{text[0:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}"
+    return text or None
+
 def parse_yyyymmddhhmm(val):
-    if not val or len(val) < 12:
+    text = str(val or "").strip()
+    if not text:
         return None
     try:
-        return datetime.strptime(val, "%Y%m%d%H%M")
-    except Exception:
+        return datetime.strptime(text, "%Y%m%d%H%M")
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", ""))
+    except ValueError:
         return None
 
 def format_display_date(value):
@@ -143,46 +154,8 @@ def close_db(_):
         db.close()
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(V3_DB_PATH)
     db.executescript("""
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ticker TEXT NOT NULL,
-        market TEXT,
-        direction TEXT NOT NULL CHECK(direction IN ('long','short')),
-        entry_date TEXT NOT NULL,
-        exit_date TEXT,
-        entry_price REAL NOT NULL,
-        exit_price REAL,
-        size REAL NOT NULL,
-        stop_loss REAL,
-        take_profit REAL,
-        fees REAL DEFAULT 0,
-        setup TEXT,
-        timeframe TEXT,
-        market_condition TEXT,
-        confidence INTEGER,
-        emotion TEXT,
-        followed_plan INTEGER,
-        thesis TEXT,
-        mistakes TEXT,
-        lessons TEXT,
-        tags TEXT,
-        checklist TEXT,
-        post_trade_checklist TEXT,
-        trade_rating INTEGER,
-        obsidian_links TEXT,
-        markdown_note_path TEXT,
-        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS screenshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trade_id INTEGER NOT NULL,
-        filename TEXT NOT NULL,
-        caption TEXT,
-        FOREIGN KEY(trade_id) REFERENCES trades(id) ON DELETE CASCADE
-    );
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -223,7 +196,7 @@ def set_setting(key, value):
     
 #-----------IBKR--------------
 
-from ibkr import fetch_flex_report, parse_executions, parse_open_positions, match_round_trips
+from ibkr import fetch_flex_report
 from v3_import_ibkr_trades import (
     init_db as v3_init_db,
     parse_trades_html as v3_parse_trades_html,
@@ -231,467 +204,6 @@ from v3_import_ibkr_trades import (
     build_trade_rows as v3_build_trade_rows,
     insert_trades as v3_insert_trades,
 )
-
-# Cache last raw XML for reconciliation without re-fetching
-_LAST_XML = {"data": None, "ts": 0}
-
-
-def _trade_fingerprint(row):
-    """Stable key to detect duplicate trades across imports."""
-    def _norm_num(v):
-        try:
-            return round(float(v), 6)
-        except Exception:
-            return 0.0
-
-    return (
-        (row.get("ticker") or "").upper(),
-        (row.get("direction") or "").lower(),
-        (row.get("entry_date") or ""),
-        (row.get("exit_date") or ""),
-        _norm_num(row.get("entry_price")),
-        _norm_num(row.get("exit_price")),
-        _norm_num(row.get("size")),
-        (row.get("status") or "").lower(),
-    )
-
-
-def _trade_fingerprint_coarse(row):
-    """Coarser key for matching manual vs imported trades (ignores size splits)."""
-    def _norm_num(v):
-        try:
-            return round(float(v), 4)
-        except Exception:
-            return 0.0
-
-    def _norm_dt_min(v):
-        text = (v or "").strip()
-        if not text:
-            return ""
-        text = text.replace(" ", "T")
-        try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%dT%H:%M")
-        except Exception:
-            return text[:16]
-
-    return (
-        (row.get("ticker") or "").upper(),
-        (row.get("direction") or "").lower(),
-        _norm_dt_min(row.get("entry_date")),
-        _norm_dt_min(row.get("exit_date")),
-        _norm_num(row.get("entry_price")),
-        _norm_num(row.get("exit_price")),
-        (row.get("status") or "").lower(),
-    )
-
-
-def _trade_fingerprint_fuzzy(row):
-    """Very tolerant key to match same trade imported from different sources/formats."""
-    def _norm_minute(v):
-        text = (v or "").strip()
-        if not text:
-            return ""
-        text = text.replace(" ", "T")
-        try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%dT%H:%M")
-        except Exception:
-            return text[:16]
-
-    def _norm_price(v):
-        try:
-            return round(float(v), 2)
-        except Exception:
-            return 0.0
-
-    return (
-        (row.get("ticker") or "").upper(),
-        (row.get("direction") or "").lower(),
-        _norm_minute(row.get("entry_date")),
-        _norm_minute(row.get("exit_date")),
-        _norm_price(row.get("entry_price")),
-        (row.get("status") or "").lower(),
-    )
-
-
-def _cleanup_existing_ibkr_duplicates(db):
-    """Delete pre-existing IBKR duplicate rows, including CSV-vs-Flex duplicates."""
-    rows = db.execute(
-        """
-        SELECT id, ticker, direction, entry_date, exit_date, entry_price, exit_price, size, status, tags
-        FROM trades
-        WHERE setup='IBKR import'
-        ORDER BY id
-        """
-    ).fetchall()
-
-    # Group by fuzzy key to catch same trade represented differently
-    # (CSV aggregated lot vs Flex split fills with seconds/slight exit-price differences).
-    buckets = defaultdict(list)
-    for r in rows:
-        d = dict(r)
-        buckets[_trade_fingerprint_fuzzy(d)].append(d)
-
-    dup_ids = []
-    for _, group in buckets.items():
-        if len(group) <= 1:
-            continue
-
-        has_flex_tag = any("ibkr-id:" in ((g.get("tags") or "")) for g in group)
-        if not has_flex_tag:
-            # Don't touch manual duplicates here; only IBKR/Flex-related duplicates.
-            continue
-
-        # Prefer keeping non-Flex row (typically CSV import) if present.
-        non_flex = [g for g in group if "ibkr-id:" not in ((g.get("tags") or ""))]
-        if non_flex:
-            keep_id = min(g["id"] for g in non_flex)
-        else:
-            keep_id = min(g["id"] for g in group)
-
-        for g in group:
-            if g["id"] != keep_id:
-                dup_ids.append(g["id"])
-
-    if dup_ids:
-        placeholders = ",".join("?" for _ in dup_ids)
-        db.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", dup_ids)
-    return len(dup_ids)
-
-
-def _remove_matching_ibkr_open_leg(db, closed_trade):
-    """Retire or reduce a previously imported IBKR open leg when close legs arrive."""
-    exec_id = (closed_trade.get("exec_id") or "").strip()
-    if "__" not in exec_id:
-        return 0
-
-    parts = exec_id.split("__")
-    if len(parts) < 3:
-        return 0
-
-    entry_exec_id = parts[0]
-    try:
-        closed_qty = float(parts[-1])
-    except Exception:
-        closed_qty = None
-
-    row = db.execute(
-        """
-        SELECT id, size, fees, tags
-        FROM trades
-        WHERE setup='IBKR import'
-          AND status='open'
-          AND UPPER(COALESCE(ticker, '')) = ?
-          AND LOWER(COALESCE(direction, '')) = ?
-          AND COALESCE(entry_date, '') = ?
-          AND ABS(COALESCE(entry_price, 0) - ?) < 1e-6
-          AND COALESCE(tags, '') LIKE ?
-        ORDER BY id ASC
-        LIMIT 1
-        """,
-        (
-            (closed_trade.get("ticker") or "").upper(),
-            (closed_trade.get("direction") or "").lower(),
-            closed_trade.get("entry_date") or "",
-            float(closed_trade.get("entry_price") or 0),
-            f"%ibkr-id:{entry_exec_id}__open__%",
-        ),
-    ).fetchone()
-
-    if not row:
-        return 0
-
-    open_id = row["id"]
-    open_size = float(row["size"] or 0)
-    open_fees = float(row["fees"] or 0)
-    open_tags = row["tags"] or ""
-
-    # Unknown/invalid close size -> safest is to remove the matched open leg.
-    if closed_qty is None or closed_qty <= 0:
-        cur = db.execute("DELETE FROM trades WHERE id=?", (open_id,))
-        return cur.rowcount or 0
-
-    remaining = open_size - closed_qty
-    if remaining <= 1e-9:
-        cur = db.execute("DELETE FROM trades WHERE id=?", (open_id,))
-        return cur.rowcount or 0
-
-    # Partial close: keep open leg with reduced size and proportional remaining fees.
-    remaining_fees = open_fees * (remaining / open_size) if open_size > 0 else open_fees
-    marker_prefix = f"ibkr-id:{entry_exec_id}__open__"
-    updated_tags = []
-    replaced = False
-    for tag in [t.strip() for t in open_tags.split(",") if t.strip()]:
-        if tag.startswith(marker_prefix):
-            updated_tags.append(f"{marker_prefix}{round(remaining, 10)}")
-            replaced = True
-        else:
-            updated_tags.append(tag)
-    if not replaced:
-        updated_tags.append(f"{marker_prefix}{round(remaining, 10)}")
-
-    cur = db.execute(
-        "UPDATE trades SET size=?, fees=?, tags=? WHERE id=?",
-        (remaining, round(remaining_fees, 4), ",".join(updated_tags), open_id),
-    )
-    return cur.rowcount or 0
-
-# @app.route("/ibkr", methods=["GET", "POST"])
-# def ibkr_import():
-#     if request.method == "POST":
-#         token = request.form.get("token", "").strip() or get_setting("ibkr_token", "")
-#         query_id = request.form.get("query_id", "").strip() or get_setting("ibkr_query_id", "")
-#         app.logger.info("IBKR import requested (query_id=%s, token_set=%s)", query_id or "<empty>", bool(token))
-#         set_setting("ibkr_token", token)
-#         set_setting("ibkr_query_id", query_id)
-#         try:
-#             xml = fetch_flex_report(token, query_id)
-#             _LAST_XML["data"] = xml
-#             _LAST_XML["ts"] = datetime.now().timestamp()
-
-#             executions = parse_executions(xml)
-#             closed, still_open, skipped_tickers = match_round_trips(executions)
-
-#             db = get_db()
-#             removed_dupes = _cleanup_existing_ibkr_duplicates(db)
-
-#             existing = set()
-#             existing_fingerprints = set()
-#             existing_fingerprints_coarse = set()
-#             existing_fingerprints_fuzzy = set()
-#             for r in db.execute("SELECT tags FROM trades WHERE tags LIKE '%ibkr-id:%'").fetchall():
-#                 for tag in (r["tags"] or "").split(","):
-#                     tag = tag.strip()
-#                     if tag.startswith("ibkr-id:"):
-#                         existing.add(tag.split(":", 1)[1])
-
-#             for r in db.execute(
-#                 """
-#                 SELECT ticker, direction, entry_date, exit_date, entry_price, exit_price, size, status
-#                 FROM trades
-#                 """
-#             ).fetchall():
-#                 row = dict(r)
-#                 existing_fingerprints.add(_trade_fingerprint(row))
-#                 existing_fingerprints_coarse.add(_trade_fingerprint_coarse(row))
-#                 existing_fingerprints_fuzzy.add(_trade_fingerprint_fuzzy(row))
-
-#             n_closed = n_open = n_dedup = 0
-#             for t in closed:
-#                 # If this close leg exists, retire matching previously-imported open leg.
-#                 _remove_matching_ibkr_open_leg(db, t)
-
-#                 fp = _trade_fingerprint({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "exit_date": t["exit_date"],
-#                     "entry_price": t["entry_price"],
-#                     "exit_price": t["exit_price"],
-#                     "size": t["size"],
-#                     "status": "closed",
-#                 })
-#                 fp_coarse = _trade_fingerprint_coarse({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "exit_date": t["exit_date"],
-#                     "entry_price": t["entry_price"],
-#                     "exit_price": t["exit_price"],
-#                     "status": "closed",
-#                 })
-#                 fp_fuzzy = _trade_fingerprint_fuzzy({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "exit_date": t["exit_date"],
-#                     "entry_price": t["entry_price"],
-#                     "exit_price": t["exit_price"],
-#                     "status": "closed",
-#                 })
-#                 if (
-#                     t["exec_id"] in existing
-#                     or fp in existing_fingerprints
-#                 ):
-#                     n_dedup += 1
-#                     continue
-#                 db.execute("""INSERT INTO trades
-#                     (ticker, market, direction, entry_date, exit_date, entry_price,
-#                      exit_price, size, fees, setup, tags, status)
-#                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-#                     (t["ticker"], t["market"], t["direction"], t["entry_date"],
-#                      t["exit_date"], t["entry_price"], t["exit_price"], t["size"],
-#                      t["fees"], "IBKR import", f"ibkr,ibkr-id:{t['exec_id']}", "closed"))
-#                 n_closed += 1
-#                 existing.add(t["exec_id"])
-#                 existing_fingerprints.add(fp)
-#                 existing_fingerprints_coarse.add(fp_coarse)
-#                 existing_fingerprints_fuzzy.add(fp_fuzzy)
-#             for t in still_open:
-#                 fp = _trade_fingerprint({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "entry_price": t["entry_price"],
-#                     "size": t["size"],
-#                     "status": "open",
-#                 })
-#                 fp_coarse = _trade_fingerprint_coarse({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "entry_price": t["entry_price"],
-#                     "status": "open",
-#                 })
-#                 fp_fuzzy = _trade_fingerprint_fuzzy({
-#                     "ticker": t["ticker"],
-#                     "direction": t["direction"],
-#                     "entry_date": t["entry_date"],
-#                     "entry_price": t["entry_price"],
-#                     "status": "open",
-#                 })
-#                 if (
-#                     t["exec_id"] in existing
-#                     or fp in existing_fingerprints
-#                 ):
-#                     n_dedup += 1
-#                     continue
-#                 db.execute("""INSERT INTO trades
-#                     (ticker, market, direction, entry_date, entry_price, size, fees,
-#                      setup, tags, status)
-#                     VALUES (?,?,?,?,?,?,?,?,?,?)""",
-#                     (t["ticker"], t["market"], t["direction"], t["entry_date"],
-#                      t["entry_price"], t["size"], t["fees"],
-#                      "IBKR import", f"ibkr,ibkr-id:{t['exec_id']}", "open"))
-#                 n_open += 1
-#                 existing.add(t["exec_id"])
-#                 existing_fingerprints.add(fp)
-#                 existing_fingerprints_coarse.add(fp_coarse)
-#                 existing_fingerprints_fuzzy.add(fp_fuzzy)
-#             db.commit()
-#             app.logger.info(
-#                 "IBKR import successful (closed=%s, open=%s, skipped=%s, dedup=%s, cleaned=%s)",
-#                 n_closed,
-#                 n_open,
-#                 skipped_tickers,
-#                 n_dedup,
-#                 removed_dupes,
-#             )
-#             flash(f"✅ Imported {n_closed} closed round-trips and {n_open} open positions from IBKR", "success")
-#             if n_dedup:
-#                 flash(f"⚠️ Skipped {n_dedup} duplicate trade(s) already present in your journal.", "warning")
-#             if removed_dupes:
-#                 flash(f"🧹 Removed {removed_dupes} previously duplicated IBKR trade row(s).", "success")
-#             if skipped_tickers:
-#                 tickers_str = ", ".join(sorted(skipped_tickers))
-#                 flash(
-#                     f"⚠️ Skipped {len(skipped_tickers)} ticker(s) with no entry data: {tickers_str}. "
-#                     "Their BUY fills are not in the Flex report — go to IBKR → "
-#                     "Performance & Reports → Flex Queries → edit your query → "
-#                     "Delivery Configuration → Date Range, set it to cover your entry day, then Save and re-import.",
-#                     "warning"
-#                 )
-#             return redirect(url_for("ibkr_reconcile"))
-#         except Exception as e:
-#             app.logger.exception("IBKR import failed")
-#             flash(f"IBKR import failed: {e}", "danger")
-#         return redirect(url_for("ibkr_import"))
-#     return render_template("ibkr.html",
-#         token=get_setting("ibkr_token", ""),
-#         query_id=get_setting("ibkr_query_id", ""))
-
-
-@app.route("/ibkr/debug")
-def ibkr_debug():
-    """Diagnostic: fetch raw XML and show what the parser extracts."""
-    token = get_setting("ibkr_token", "")
-    query_id = get_setting("ibkr_query_id", "")
-    if not token or not query_id:
-        return Response("No token/query_id saved yet. Submit the IBKR form first.", mimetype="text/plain", status=400)
-    try:
-        xml = fetch_flex_report(token, query_id)
-    except Exception as e:
-        return Response(f"FETCH ERROR: {e}", mimetype="text/plain", status=500)
-
-    executions = parse_executions(xml)
-    closed, still_open, skipped = match_round_trips(executions)
-
-    lines = ["=== RAW XML (first 3000 chars) ===", xml[:3000], "",
-             f"=== EXECUTIONS PARSED: {len(executions)} ==="]
-    for e in executions:
-        lines.append(f"  {e['ticker']:6s} qty={e['qty']:+.0f}  price={e['price']}  dt={e['datetime']}  close_only={e['is_close_only']}  exec_id={e['exec_id']}")
-
-    lines += ["", f"=== CLOSED ROUND-TRIPS: {len(closed)} ==="]
-    for t in closed:
-        lines.append(f"  {t['ticker']:6s} {t['direction']:5s}  entry={t['entry_date']}@{t['entry_price']}  exit={t['exit_date']}@{t['exit_price']}  size={t['size']}  fees={t['fees']}")
-
-    lines += ["", f"=== STILL OPEN: {len(still_open)} ==="]
-    for t in still_open:
-        lines.append(f"  {t['ticker']:6s} {t['direction']:5s}  entry={t['entry_date']}@{t['entry_price']}  size={t['size']}")
-
-    lines += ["", f"=== SKIPPED (no entry data): {sorted(skipped)} ==="]
-
-    return Response("\n".join(lines), mimetype="text/plain; charset=utf-8")
-
-
-# @app.route("/ibkr/positions", methods=["GET", "POST"])
-# def ibkr_reconcile():
-#     refresh = request.method == "POST" or request.args.get("refresh") == "1"
-#     xml = _LAST_XML["data"]
-#     if refresh or not xml:
-#         token = get_setting("ibkr_token", "")
-#         query_id = get_setting("ibkr_query_id", "")
-#         if not token or not query_id:
-#             flash("Configure your IBKR token & query ID first", "warning")
-#             return redirect(url_for("ibkr_import"))
-#         try:
-#             xml = fetch_flex_report(token, query_id)
-#             _LAST_XML["data"] = xml
-#             _LAST_XML["ts"] = datetime.now().timestamp()
-#         except Exception as e:
-#             app.logger.exception("IBKR reconcile fetch failed")
-#             flash(f"Failed to fetch positions: {e}", "danger")
-#             return redirect(url_for("ibkr_import"))
-
-#     ibkr_positions = parse_open_positions(xml)
-
-#     journal_open = defaultdict(lambda: {"qty": 0, "trades": []})
-#     for r in get_db().execute("SELECT * FROM trades WHERE status='open' AND (tags IS NULL OR tags NOT LIKE '%playbook%')").fetchall():
-#         d = dict(r)
-#         sign = 1 if d["direction"] == "long" else -1
-#         journal_open[d["ticker"]]["qty"] += sign * d["size"]
-#         journal_open[d["ticker"]]["trades"].append(d)
-
-#     tickers = set(p["ticker"] for p in ibkr_positions) | set(journal_open.keys())
-#     rows = []
-#     for tk in sorted(tickers):
-#         ib = next((p for p in ibkr_positions if p["ticker"] == tk), None)
-#         ib_qty = ib["qty"] if ib else 0
-#         jr_qty = journal_open[tk]["qty"]
-#         diff = round(ib_qty - jr_qty, 4)
-#         if abs(diff) < 1e-6:
-#             status = "match"
-#         elif ib and jr_qty == 0:
-#             status = "missing_in_journal"
-#         elif not ib and jr_qty != 0:
-#             status = "missing_in_ibkr"
-#         else:
-#             status = "mismatch"
-#         rows.append({
-#             "ticker": tk,
-#             "ibkr_qty": ib_qty,
-#             "ibkr_avg": ib["avg_cost"] if ib else None,
-#             "ibkr_mark": ib["mark_price"] if ib else None,
-#             "ibkr_upnl": ib["unrealized_pnl"] if ib else None,
-#             "journal_qty": jr_qty,
-#             "journal_trades": journal_open[tk]["trades"],
-#             "diff": diff,
-#             "status": status,
-#         })
-
-#     last_sync = datetime.fromtimestamp(_LAST_XML["ts"]).strftime("%Y-%m-%d %H:%M") if _LAST_XML["ts"] else "—"
-#     return render_template("ibkr_reconcile.html", rows=rows, last_sync=last_sync)
 
 # ---------- Domain ----------
 def calc_pnl(t):
@@ -743,9 +255,11 @@ def trade_to_dict(row):
     if "take_profit" not in d:
         d["take_profit"] = None
     if "entry_date" not in d:
-        d["entry_date"] = d.get("entry_datetime")
+        d["entry_date"] = compact_dt_to_iso(d.get("entry_datetime"))
     if "exit_date" not in d:
-        d["exit_date"] = d.get("exit_datetime")
+        d["exit_date"] = compact_dt_to_iso(d.get("exit_datetime"))
+    if "ticker" not in d:
+        d["ticker"] = d.get("symbol")
     if "followed_plan" not in d:
         d["followed_plan"] = None
     pnl_abs, pnl_pct, r_mult = calc_pnl(d)
@@ -805,12 +319,14 @@ def build_trade_campaigns(trades):
         active = None
         active_open_qty = 0.0
         campaign_index = 0
+        # Rows carrying their own entry+exit: one campaign per entry timestamp.
+        standalone_by_entry = {}
 
-        def _finalize_active():
-            if not active or not active.get("trades"):
+        def _finalize(camp):
+            if not camp or not camp.get("trades"):
                 return
             ordered = sorted(
-                active["trades"],
+                camp["trades"],
                 key=lambda t: (
                     parse_trade_datetime(t.get("entry_date")) or datetime.min,
                     parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min,
@@ -825,9 +341,9 @@ def build_trade_campaigns(trades):
                     str(direction),
                     start.isoformat(),
                     end.isoformat(),
-                    str(active["idx"]),
+                    str(camp["idx"]),
                 ]),
-                "bucket_key": (symbol, direction, active["idx"]),
+                "bucket_key": (symbol, direction, camp["idx"]),
                 "start": start,
                 "end": end,
                 "trades": ordered,
@@ -848,32 +364,34 @@ def build_trade_campaigns(trades):
 
             if status == "closed":
                 if active is None or active_open_qty <= 0:
-                    # Standalone closed row (already opened+closed in a single fill/campaign row).
-                    campaign_index += 1
-                    active = {"idx": campaign_index, "trades": [trade]}
-                    _finalize_active()
-                    active = None
-                    active_open_qty = 0.0
+                    # Standalone round-trip: merge every scale-out sharing the same entry timestamp.
+                    entry_key = trade.get("entry_datetime") or trade.get("entry_date") or ""
+                    if not entry_key:
+                        entry_key = f"__id__{trade.get('id')}"
+                    camp = standalone_by_entry.get(entry_key)
+                    if camp is None:
+                        campaign_index += 1
+                        camp = {"idx": campaign_index, "trades": []}
+                        standalone_by_entry[entry_key] = camp
+                    camp["trades"].append(trade)
                     continue
 
                 active["trades"].append(trade)
                 active_open_qty = max(0.0, active_open_qty - max(qty, 0.0))
                 if active_open_qty <= 0:
-                    _finalize_active()
+                    _finalize(active)
                     active = None
                     active_open_qty = 0.0
                 continue
 
             # Unknown status: isolate as its own campaign to avoid accidental merges.
             campaign_index += 1
-            isolated = {"idx": campaign_index, "trades": [trade]}
-            active_backup, qty_backup = active, active_open_qty
-            active, active_open_qty = isolated, 0.0
-            _finalize_active()
-            active, active_open_qty = active_backup, qty_backup
+            _finalize({"idx": campaign_index, "trades": [trade]})
 
         if active is not None and active.get("trades"):
-            _finalize_active()
+            _finalize(active)
+        for camp in standalone_by_entry.values():
+            _finalize(camp)
 
     campaigns.sort(key=lambda c: c["start"], reverse=True)
     return campaigns
@@ -943,10 +461,6 @@ def aggregate_trade_campaign(campaign):
     aggregated["pnl_pct"] = pnl_pct
     aggregated["r_multiple"] = r_mult
     return aggregated
-
-def group_trades_for_display(trades):
-    campaigns = build_trade_campaigns(trades)
-    return [aggregate_trade_campaign(campaign) for campaign in campaigns]
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
@@ -1052,51 +566,6 @@ def risk_alerts(trades):
     except Exception:
         pass  # never let a calendar fetch break the dashboard
     return alerts
-
-def sync_obsidian_note(t):
-    """Create/update a markdown note for the trade if enabled."""
-    if get_setting("obsidian_export_enabled") != "1":
-        return None
-    fname = f"Trade-{t['id']:04d}-{t['ticker']}-{t['entry_date'][:10]}.md"
-    path = os.path.join(OBSIDIAN_NOTES_DIR, fname)
-    pnl = t.get("pnl_abs")
-    pnl_str = f"${pnl:.2f}" if pnl is not None else "—"
-    r_str = f"{t.get('r_multiple'):.2f}R" if t.get("r_multiple") is not None else "—"
-    tags = (t.get("tags") or "").replace(" ", "")
-    tag_line = " ".join(f"#{tg}" for tg in tags.split(",") if tg)
-    content = f"""---
-ticker: {t['ticker']}
-direction: {t['direction']}
-entry_date: {t['entry_date']}
-exit_date: {t.get('exit_date') or ''}
-pnl: {pnl if pnl is not None else ''}
-r_multiple: {t.get('r_multiple') or ''}
-setup: {t.get('setup') or ''}
-status: {t['status']}
----
-
-# {t['ticker']} — {t['direction'].upper()} ({t['entry_date'][:10]})
-
-**P&L:** {pnl_str} | **R:** {r_str} | **Setup:** {t.get('setup') or '—'}
-
-## Thesis
-{t.get('thesis') or '_n/a_'}
-
-## Mistakes
-{t.get('mistakes') or '_n/a_'}
-
-## Lessons
-{t.get('lessons') or '_n/a_'}
-
-## Tags
-{tag_line}
-
-## Linked notes
-{t.get('obsidian_links') or ''}
-"""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return fname
 
 # ---------- Dismiss alert ----------
 @app.route("/dismiss-alert", methods=["POST"])
@@ -1500,138 +969,7 @@ def api_stock_relations():
 # ---------- Routes: trades ----------
 @app.route("/trades")
 def trades_list():
-    db = get_db()
-    q = request.args.get("q", "").strip()
-    status = request.args.get("status", "")
-    setup = request.args.get("setup", "")
-    selected_day = normalize_iso_day(request.args.get("day", "").strip())
-    merge_open = (request.args.get("merge_open", "") or "").strip().lower() in {"1", "true", "yes", "on"}
-    show_individual = request.args.get("raw") == "1"
-    selected_campaign = request.args.get("campaign", "").strip()
-    sql = "SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%')"
-    params = []
-    if q:
-        sql += " AND (ticker LIKE ? OR setup LIKE ? OR tags LIKE ?)"
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
-    if status in ("open", "closed"):
-        sql += " AND status = ?"
-        params.append(status)
-    if setup:
-        sql += " AND setup = ?"
-        params.append(setup)
-    if selected_day:
-        sql += " AND (substr(entry_date, 1, 10) = ? OR substr(COALESCE(exit_date, ''), 1, 10) = ?)"
-        params.extend([selected_day, selected_day])
-    sql += " ORDER BY entry_date DESC"
-    rows = db.execute(sql, params).fetchall()
-    filtered_trades = [trade_to_dict(r) for r in rows]
-    campaigns = build_trade_campaigns(filtered_trades)
-    campaign_map = {campaign["campaign_id"]: campaign for campaign in campaigns}
-    trades = [aggregate_trade_campaign(campaign) for campaign in campaigns]
-
-    if merge_open:
-        merged_trades = []
-        merged_open = {}
-        open_order = []
-        for trade in trades:
-            if trade.get("status") != "open":
-                merged_trades.append(trade)
-                continue
-            merge_key = (trade.get("ticker"), trade.get("direction") or "")
-            if merge_key not in merged_open:
-                merged_open[merge_key] = dict(trade)
-                merged_open[merge_key]["_entry_notional"] = float(trade.get("entry_price") or 0) * float(trade.get("size") or 0)
-                open_order.append(merge_key)
-                continue
-            current = merged_open[merge_key]
-            current_size = float(current.get("size") or 0)
-            trade_size = float(trade.get("size") or 0)
-            current_entry_notional = float(current.get("_entry_notional") or 0)
-            trade_entry_notional = float(trade.get("entry_price") or 0) * trade_size
-            combined_size = current_size + trade_size
-            current["size"] = round(combined_size, 4)
-            current["entry_price"] = round((current_entry_notional + trade_entry_notional) / combined_size, 4) if combined_size else current.get("entry_price")
-            current["_entry_notional"] = current_entry_notional + trade_entry_notional
-            current["fees"] = round(float(current.get("fees") or 0) + float(trade.get("fees") or 0), 4)
-            if trade.get("entry_date") and (not current.get("entry_date") or trade["entry_date"] < current["entry_date"]):
-                current["entry_date"] = trade["entry_date"]
-            current["is_grouped"] = True
-            current["group_count"] = int(current.get("group_count") or 1) + int(trade.get("group_count") or 1)
-            current["_entry_notional"] = round(current["_entry_notional"], 10)
-        for trade in merged_open.values():
-            trade.pop("_entry_notional", None)
-        merged_trades.extend(merged_open[key] for key in open_order)
-        trades = sorted(merged_trades, key=lambda t: t.get("entry_date") or "", reverse=True)
-
-    if show_individual and selected_campaign in campaign_map:
-        selected_camp = campaign_map[selected_campaign]
-
-        # Calcula position_value total agrupado por entry_date (solo fecha)
-        entry_groups = defaultdict(list)
-        for t in selected_camp["trades"]:
-            entry_key = (t.get("entry_date") or "")[:10]
-            entry_groups[entry_key].append(t)
-
-        entry_pos_values = {
-            entry_key: sum((f.get("size") or 0) * (f.get("entry_price") or 0) for f in fills)
-            for entry_key, fills in entry_groups.items()
-        }
-
-        selected_members = sorted(
-            selected_camp["trades"],
-            key=lambda t: (
-                parse_trade_datetime(t.get("exit_date") or t.get("entry_date")) or datetime.min,
-                parse_trade_datetime(t.get("entry_date")) or datetime.min,
-                t.get("id") or 0,
-            ),
-        )
-
-        trades = []
-        for t in selected_members:
-            t = dict(t)  # copia mutable
-            t["campaign_pos_value"] = entry_pos_values.get((t.get("entry_date") or "")[:10])
-            trades.append(t)
-
-            
-
-    setups = [r["setup"] for r in db.execute("SELECT DISTINCT setup FROM trades WHERE setup IS NOT NULL AND setup<>'' ORDER BY setup").fetchall()]
-    selected_day_label = format_display_date(selected_day) if selected_day else None
-    raw_group_active = show_individual and selected_campaign in campaign_map
-    if not raw_group_active:
-        show_individual = False
-        selected_campaign = ""
-    raw_group_label = None
-    raw_group_anchor = None
-    if raw_group_active:
-        summary = aggregate_trade_campaign(campaign_map[selected_campaign])
-        raw_group_anchor = campaign_map[selected_campaign]["trades"][0]["id"] if raw_group_active else None
-        raw_group_label = f"{summary['ticker']} · {format_display_date(summary['entry_date'])}"
-        if summary.get("exit_date"):
-            raw_group_label += f" → {format_display_date(summary['exit_date'])}"
-    # Use the exact same logic as analytics for suggested_sizing_rule
-    trades_all = all_trades_dicts()
-    closed = closed_trades(trades_all)
-    closed_positions = [aggregate_trade_campaign(c) for c in build_trade_campaigns(closed)]
-    suggested_sizing_rule = float(np.median([t["size"] * t["entry_price"] for t in closed_positions if t.get("size") and t.get("entry_price")])) if closed_positions else 0
-    stats = {"execution": {"optimal_size": round(suggested_sizing_rule, 2)}}
-    return render_template(
-        "trades.html",
-        trades=trades,
-        q=q,
-        status=status,
-        setup=setup,
-        setups=setups,
-        selected_day=selected_day,
-        selected_day_label=selected_day_label,
-        show_individual=show_individual,
-        raw_group_active=raw_group_active,
-        raw_group_label=raw_group_label,
-        raw_group_anchor=raw_group_anchor,
-        selected_campaign=selected_campaign,
-        merge_open=merge_open,
-        stats=stats,
-        v3_mode=False,
-    )
+    return redirect(url_for("v3_trades_list", **request.args.to_dict(flat=True)))
 
 
 @app.route("/v3/trades")
@@ -1647,7 +985,7 @@ def v3_trades_list():
     conn = sqlite3.connect(V3_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        sql = "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission FROM trades WHERE 1=1"
+        sql = "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction FROM trades WHERE 1=1"
         params = []
 
         if q:
@@ -1729,7 +1067,8 @@ def v3_trades_list():
         pnl_abs = None
         pnl_pct = None
         if exit_price is not None:
-            pnl_abs = (exit_price - entry_price) * size - fees
+            direction_sign = -1 if (r.get("direction") or "long") == "short" else 1
+            pnl_abs = (exit_price - entry_price) * size * direction_sign - fees
             cost = entry_price * size
             pnl_pct = (pnl_abs / cost * 100) if cost else None
 
@@ -1741,7 +1080,7 @@ def v3_trades_list():
             "id": int(r["id"]),
             "symbol": r["symbol"],
             "entry_datetime": r["entry_datetime"],
-            "direction": "long",
+            "direction": r.get("direction") or "long",
             "entry_date": entry_iso,
             "exit_date": exit_iso,
             "entry_price": round(entry_price, 2),
@@ -2274,124 +1613,6 @@ def api_v3_ohlcv():
         return jsonify({"error": str(exc)}), 500
 
 
-    """Insert or update a trade from form data."""
-    db = get_db()
-    exit_price = f.get("exit_price") or None
-    status = "closed" if exit_price else "open"
-    checklist = json.dumps(f.getlist("checklist"))
-    post_trade_checklist = json.dumps(f.getlist("post_trade_checklist"))
-    trade_rating = int(f.get("trade_rating") or 0) or None
-
-    fields = dict(
-        ticker=f["ticker"].upper().strip(),
-        market=f.get("market"),
-        direction=f["direction"],
-        entry_date=f["entry_date"],
-        exit_date=f.get("exit_date") or None,
-        entry_price=float(f["entry_price"]),
-        exit_price=float(exit_price) if exit_price else None,
-        size=float(f["size"]),
-        stop_loss=float(f["stop_loss"]) if f.get("stop_loss") else None,
-        take_profit=float(f["take_profit"]) if f.get("take_profit") else None,
-        fees=float(f.get("fees") or 0),
-        setup=f.get("setup"),
-        timeframe=f.get("timeframe"),
-        market_condition=f.get("market_condition"),
-        confidence=int(f["confidence"]) if f.get("confidence") else None,
-        emotion=f.get("emotion"),
-        followed_plan=1 if f.get("followed_plan") == "yes" else (0 if f.get("followed_plan") == "no" else None),
-        thesis=f.get("thesis"),
-        mistakes=f.get("mistakes"),
-        lessons=f.get("lessons"),
-        tags=f.get("tags"),
-        checklist=checklist,
-        post_trade_checklist=post_trade_checklist,
-        trade_rating=trade_rating,
-        obsidian_links=f.get("obsidian_links"),
-        status=status,
-    )
-    if trade_id:
-        sets = ", ".join(f"{k}=?" for k in fields)
-        db.execute(f"UPDATE trades SET {sets} WHERE id=?", (*fields.values(), trade_id))
-        tid = trade_id
-    else:
-        cols = ", ".join(fields)
-        qs = ", ".join("?" * len(fields))
-        cur = db.execute(f"INSERT INTO trades ({cols}) VALUES ({qs})", tuple(fields.values()))
-        tid = cur.lastrowid
-    # Screenshots (multi)
-    uploaded = files.getlist("screenshots") if files else []
-    for file in uploaded:
-        if file and file.filename and allowed_file(file.filename):
-            fname = secure_filename(f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{file.filename}")
-            file.save(os.path.join(UPLOAD_DIR, fname))
-            db.execute("INSERT INTO screenshots (trade_id, filename, caption) VALUES (?,?,?)",
-                       (tid, fname, file.filename))
-    db.commit()
-    # Obsidian sync
-    row = db.execute("SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%') AND id=?", (tid,)).fetchone()
-    note = sync_obsidian_note(trade_to_dict(row))
-    if note:
-        db.execute("UPDATE trades SET markdown_note_path=? WHERE id=?", (note, tid))
-        db.commit()
-    return tid
-
-
-@app.route("/trades/<int:tid>")
-def trade_detail(tid):
-    db = get_db()
-    row = db.execute("SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%') AND id=?", (tid,)).fetchone()
-    if not row: abort(404)
-    t = trade_to_dict(row)
-    t["checklist_list"] = json.loads(t["checklist"]) if t.get("checklist") else []
-    shots = db.execute("SELECT * FROM screenshots WHERE trade_id=? ORDER BY id", (tid,)).fetchall()
-    # prev/next for replay-like nav
-    nxt = db.execute("SELECT id FROM trades WHERE entry_date>? AND (tags IS NULL OR tags NOT LIKE '%playbook%') ORDER BY entry_date ASC LIMIT 1", (row["entry_date"],)).fetchone()
-    prv = db.execute("SELECT id FROM trades WHERE entry_date<? AND (tags IS NULL OR tags NOT LIKE '%playbook%') ORDER BY entry_date DESC LIMIT 1", (row["entry_date"],)).fetchone()
-    return render_template("trade_detail.html", t=t, screenshots=shots,
-                           next_id=nxt["id"] if nxt else None,
-                           prev_id=prv["id"] if prv else None)
-
-@app.route("/trades/<int:tid>/delete", methods=["POST"])
-def delete_trade(tid):
-    db = get_db()
-    db.execute("DELETE FROM trades WHERE id=?", (tid,))
-    db.commit()
-    flash("Trade deleted", "success")
-    return redirect(url_for("trades_list"))
-
-@app.route("/screenshots/<int:sid>/delete", methods=["POST"])
-def delete_screenshot(sid):
-    db = get_db()
-    row = db.execute("SELECT * FROM screenshots WHERE id=?", (sid,)).fetchone()
-    if row:
-        try: os.remove(os.path.join(UPLOAD_DIR, row["filename"]))
-        except OSError: pass
-        db.execute("DELETE FROM screenshots WHERE id=?", (sid,))
-        db.commit()
-        return redirect(url_for("trade_detail", tid=row["trade_id"]))
-    abort(404)
-
-# ---------- Tags / setups (autocomplete) ----------
-def all_tags():
-    rows = get_db().execute("SELECT DISTINCT tags FROM trades WHERE tags IS NOT NULL AND tags<>''").fetchall()
-    s = set()
-    for r in rows:
-        for t in (r["tags"] or "").split(","):
-            t = t.strip()
-            if t: s.add(t)
-    return sorted(s)
-
-def all_setups():
-    return [r["setup"] for r in get_db().execute(
-        "SELECT DISTINCT setup FROM trades WHERE setup IS NOT NULL AND setup<>'' ORDER BY setup").fetchall()]
-
-@app.route("/api/tags")
-def api_tags(): return jsonify(all_tags())
-
-@app.route("/api/setups")
-def api_setups(): return jsonify(all_setups())
-
 # ---------- Position size calculator ----------
 @app.route("/api/position-size")
 def api_position_size():
@@ -2877,205 +2098,6 @@ def calendar_view():
         prev_y=prev_month.year, prev_m=prev_month.month,
         next_y=next_month_first.year, next_m=next_month_first.month)
 
-# --------- Playbook ----------
-@app.route("/playbook", methods=["GET", "POST"])
-def playbook():
-    db = get_db()
-    entry_methods = [
-        "HTF",
-        "Reclaim of 21EMA",
-        "Reclaim of 50SMA",
-        "Pullback to 21EMA",
-        "Pullback to 50EMA",
-        "VCP",
-        "Breakout",
-        "Low cheat",
-        "U&R",
-        "Higher low",
-        "Base on Volume Dry Up",
-        "Channel bounce",
-        "Failed Breakdown",
-        "Inside Bar",
-        "Range Expansion",
-        "Oops Reversal",
-        "Other"
-    ]
-    if request.method == "POST":
-        ticker         = request.form.get("ticker", "").strip().upper()
-        market         = request.form.get("market", "")
-        direction      = request.form.get("direction", "long")
-        entry_date     = request.form.get("entry_date", "")
-        entry_price    = float(request.form.get("entry_price", 0))
-        entry_method   = request.form.get("entry_method", "")
-        entry_strategy = request.form.get("entry_strategy", "")
-        stop_loss      = request.form.get("stop_loss", "")
-        exit_strategy  = request.form.get("exit_strategy", "")
-        tags           = "playbook"  # mark as playbook-only
-
-
-        # Parse Stop Loss input, always stored as dollar amount
-        stop_loss_raw = stop_loss.strip()
-        if stop_loss_raw.endswith("%"):
-            try:
-                percent_val = float(stop_loss_raw.rstrip("% "))
-                stop_loss = round(entry_price * (100 - percent_val) / 100, 2)  # Convert percent to $
-            except ValueError:
-                stop_loss = None  # handle error
-        elif stop_loss_raw:
-            try:
-                stop_loss = float(stop_loss_raw)
-            except ValueError:
-                stop_loss = None  # handle error
-        else:
-            stop_loss = None  # No input
-
-        # Insert the playbook trade
-        cursor = db.execute("""
-            INSERT INTO trades
-            (ticker, market, direction, entry_date, entry_price, size, stop_loss, setup, thesis, lessons, status, tags)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'open', ?)
-        """, (
-            ticker, market, direction, entry_date, entry_price,
-            stop_loss, entry_method, entry_strategy, exit_strategy, tags
-        ))
-        trade_id = cursor.lastrowid
-
-        # Handle multiple screenshots
-        screenshots = request.files.getlist("screenshots")
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        for screenshot in screenshots:
-            if screenshot and screenshot.filename:
-                fname = secure_filename(f"playbook_{trade_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{screenshot.filename}")
-                screenshot.save(os.path.join(UPLOAD_DIR, fname))
-                db.execute("INSERT INTO screenshots (trade_id, filename, caption) VALUES (?, ?, ?)",
-                           (trade_id, fname, ""))
-        db.commit()
-        flash("Playbook entry saved!", "success")
-        return redirect(url_for('playbook'))
-
-    # List playbook trades, show only those with tag 'playbook'
-    # --- Filtering support for GET requests ---
-    q_field = request.args.get('field', '').strip()
-    q_value = request.args.get('value', '').strip()
-    sql = "SELECT * FROM trades WHERE tags LIKE '%playbook%'"
-    params = []
-
-    # Add filtering logic
-    if q_field and q_value:
-        if q_field == 'entry_date':
-            sql += " AND entry_date = ?"
-            params.append(q_value)
-        elif q_field == 'entry_price':
-            sql += " AND CAST(entry_price AS TEXT) LIKE ?"
-            params.append(f"%{q_value}%")
-        elif q_field == 'entry_method':
-            sql += " AND setup = ?"
-            params.append(q_value)
-        elif q_field == 'market':
-            sql += " AND market = ?"
-            params.append(q_value)
-        elif q_field == 'direction':
-            sql += " AND direction = ?"
-            params.append(q_value)
-        else:
-            sql += f" AND {q_field} LIKE ?"
-            params.append(f"%{q_value}%")
-    sql += " ORDER BY entry_date DESC"
-
-    trades = db.execute(sql, params).fetchall()
-
-    # For each, get screenshots (could optimize with join, but typically low count)
-    entries = []
-    for t in trades:
-        t = dict(t)
-        shots = db.execute("SELECT * FROM screenshots WHERE trade_id=? ORDER BY id", (t["id"],)).fetchall()
-        t["screenshots"] = shots
-        entries.append(t)
-
-    return render_template("playbook.html", entries=entries, entry_methods=entry_methods)
-
-@app.route("/playbook/<int:tid>/edit", methods=["GET", "POST"])
-def playbook_detail(tid):
-    db = get_db()
-    row = db.execute("SELECT * FROM trades WHERE id=? AND tags LIKE '%playbook%'", (tid,)).fetchone()
-    if not row:
-        abort(404)
-    if request.method == "POST":
-        # Make sure all the same fields as in playbook creation
-        ticker = request.form.get("ticker", "").strip().upper()
-        market = request.form.get("market", "")
-        direction = request.form.get("direction", "long")
-        entry_date = request.form.get("entry_date", "")
-        entry_price = float(request.form.get("entry_price", 0))
-        size = float(request.form.get("size", 0))
-        entry_method = request.form.get("entry_method", "")
-        entry_strategy = request.form.get("entry_strategy", "")
-        exit_strategy = request.form.get("exit_strategy", "")
-        stop_loss = request.form.get("stop_loss", "")
-        tags = "playbook"
-
-        # Parse Stop Loss input, always stored as dollar amount
-        stop_loss_raw = stop_loss.strip()
-        if stop_loss_raw.endswith("%"):
-            try:
-                percent_val = float(stop_loss_raw.rstrip("% "))
-                stop_loss = round(entry_price * (100 - percent_val) / 100, 2)  # Convert percent to $
-            except ValueError:
-                stop_loss = None  # handle error
-        elif stop_loss_raw:
-            try:
-                stop_loss = float(stop_loss_raw)
-            except ValueError:
-                stop_loss = None  # handle error
-        else:
-            stop_loss = None  # No input
-
-        db.execute("""
-            UPDATE trades SET
-                ticker=?, market=?, direction=?, entry_date=?, entry_price=?, size=?, stop_loss=?,
-                setup=?, thesis=?, lessons=?, tags=?
-            WHERE id=?
-        """, (
-            ticker, market, direction, entry_date, entry_price, size, stop_loss,
-            entry_method, entry_strategy, exit_strategy, tags, tid
-        ))
-
-        # Screenshot upload
-        screenshots = request.files.getlist("screenshots")
-        import os
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        for screenshot in screenshots:
-            if screenshot and screenshot.filename:
-                fname = secure_filename(f"playbook_{tid}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{screenshot.filename}")
-                screenshot.save(os.path.join(UPLOAD_DIR, fname))
-                db.execute("INSERT INTO screenshots (trade_id, filename, caption) VALUES (?, ?, ?)", (tid, fname, ""))
-        db.commit()
-        flash("Playbook entry updated!", "success")
-        return redirect(url_for('playbook'))
-    # For GET, render form with existing data
-    # You may want to pass existing screenshots as well, for deletion
-    shots = db.execute("SELECT * FROM screenshots WHERE trade_id=? ORDER BY id", (tid,)).fetchall()
-    entry_methods = [
-        "HTF",
-        "Reclaim of 21EMA",
-        "Reclaim of 50SMA",
-        "Pullback to 21EMA",
-        "Pullback to 50EMA",
-        "VCP",
-        "Breakout",
-        "Low cheat",
-        "U&R",
-        "Higher low",
-        "Base on Volume Dry Up",
-        "Channel bounce",
-        "Failed Breakdown",
-        "Inside Bar",
-        "Range Expansion",
-        "Oops Reversal",
-        "Other"
-    ]
-    return render_template("playbook_detail.html", t=row, shots=shots, entry_methods=entry_methods)
-
 # ---------- Interest Parsing ----------
 def _parse_interest_entries_from_html_table(content):
     """Extract interest entries from HTML table format (IBKR Activity Statements)."""
@@ -3301,9 +2323,10 @@ def interest_history():
         month_net=round(float(month_totals["total"] or 0), 2),
     )
 
-# ---------- CSV Import ----------
+# ---------- Interest Import ----------
 @app.route("/import", methods=["GET", "POST"])
 def import_csv():
+    """Import cash-interest entries from an IBKR statement (HTML or CSV)."""
     if request.method == "POST":
         file = request.files.get("file")
         if not file or not file.filename:
@@ -3312,231 +2335,37 @@ def import_csv():
         try:
             content = file.read().decode("utf-8", errors="replace")
             db = get_db()
-            count = 0
-            dedup_count = 0
             interest_count = 0
 
-            # Parse interest entries from CSV first (works on raw content before HTML/standard split)
-            interest_entries = _parse_interest_entries_from_csv(content)
-            if interest_entries:
-                app.logger.info(f"Found {len(interest_entries)} interest entries to insert")
-            for entry in interest_entries:
+            for entry in _parse_interest_entries_from_csv(content):
                 try:
                     db.execute(
                         """INSERT INTO interest_entries (entry_date, gross_interest, withholding, net_interest)
                            VALUES (?, ?, ?, ?)
-                                                     ON CONFLICT(entry_date) DO UPDATE SET
-                                                         gross_interest=excluded.gross_interest,
-                                                         withholding=excluded.withholding,
-                                                         net_interest=excluded.net_interest""",
+                           ON CONFLICT(entry_date) DO UPDATE SET
+                               gross_interest=excluded.gross_interest,
+                               withholding=excluded.withholding,
+                               net_interest=excluded.net_interest""",
                         (entry['date'], entry['gross_interest'], entry['withholding'], entry['net_interest'])
                     )
                     interest_count += 1
                 except Exception as e:
                     app.logger.error(f"Could not insert interest entry {entry['date']}: {e}")
 
-            existing_fingerprints = set()
-            existing_fingerprints_coarse = set()
-            existing_fingerprints_fuzzy = set()
-            for r in db.execute(
-                """
-                SELECT ticker, direction, entry_date, exit_date, entry_price, exit_price, size, status
-                FROM trades
-                """
-            ).fetchall():
-                row = dict(r)
-                existing_fingerprints.add(_trade_fingerprint(row))
-                existing_fingerprints_coarse.add(_trade_fingerprint_coarse(row))
-                existing_fingerprints_fuzzy.add(_trade_fingerprint_fuzzy(row))
-
-
-            # --- Unified import logic with merging for both HTML and CSV ---
-            import collections
-            def merge_open_trades(trades):
-                """Merge open trades with same symbol and entry_datetime (no exit_datetime)."""
-                merged = {}
-                for t in trades:
-                    if t.get("exit_datetime") or t.get("exit_date"):
-                        # Closed trades, keep as is
-                        key = (t.get("symbol") or t.get("ticker"), t.get("entry_datetime") or t.get("entry_date"), t.get("entry_price"))
-                        merged[key] = dict(t)
-                        continue
-                    key = (t.get("symbol") or t.get("ticker"), t.get("entry_datetime") or t.get("entry_date"))
-                    if key not in merged:
-                        merged[key] = dict(t)
-                    else:
-                        m = merged[key]
-                        # Sum quantities and commissions, weighted avg price
-                        q1 = float(m.get("quantity") or m.get("size") or 0)
-                        q2 = float(t.get("quantity") or t.get("size") or 0)
-                        p1 = float(m.get("entry_price") or 0)
-                        p2 = float(t.get("entry_price") or 0)
-                        c1 = float(m.get("ib_commission") or m.get("fees") or 0)
-                        c2 = float(t.get("ib_commission") or t.get("fees") or 0)
-                        total_q = q1 + q2
-                        m["quantity"] = m["size"] = total_q
-                        m["ib_commission"] = m["fees"] = round(c1 + c2, 6)
-                        m["entry_price"] = round((p1 * q1 + p2 * q2) / total_q, 6) if total_q else p1
-                return list(merged.values())
-
-            # Parse trades from HTML or CSV
-            trades = []
-            if "<html" in content.lower() or "<table" in content.lower():
-                # HTML import
-                from html.parser import HTMLParser
-                class IBKRParser(HTMLParser):
-                    def __init__(self):
-                        super().__init__()
-                        self.in_table = False
-                        self.in_cell = False
-                        self.current_row = []
-                        self.rows = []
-                        self.current_cell = ""
-                    def handle_starttag(self, tag, attrs):
-                        if tag in ("table",): self.in_table = True
-                        if tag in ("td", "th"): self.in_cell = True; self.current_cell = ""
-                    def handle_endtag(self, tag):
-                        if tag in ("td", "th"):
-                            self.current_row.append(self.current_cell.strip())
-                            self.in_cell = False
-                        if tag == "tr":
-                            if self.current_row:
-                                self.rows.append(self.current_row)
-                            self.current_row = []
-                    def handle_data(self, data):
-                        if self.in_cell:
-                            self.current_cell += data
-                parser = IBKRParser()
-                parser.feed(content)
-                rows = parser.rows
-                for row in rows:
-                    if len(row) < 10:
-                        continue
-                    symbol = row[0].strip()
-                    if not symbol or symbol.startswith('Total') or symbol in ('Symbol', 'Stocks', 'USD', 'EUR', 'Trades'):
-                        continue
-                    try:
-                        dt_str = row[1].strip()
-                        qty = float(row[2].replace(',', ''))
-                        price = float(row[3].replace(',', ''))
-                        comm = abs(float(row[6].replace(',', '')))
-                        dt_parsed = datetime.strptime(dt_str, '%Y-%m-%d, %H:%M:%S')
-                        dt_iso = dt_parsed.strftime('%Y%m%d%H%M')
-                    except (ValueError, AttributeError, IndexError):
-                        continue
-                    trades.append({
-                        "symbol": symbol,
-                        "entry_datetime": dt_iso,
-                        "entry_price": price,
-                        "quantity": qty,
-                        "ib_commission": comm,
-                        "exit_datetime": None,
-                    })
-            else:
-                # CSV import
-                reader = csv.DictReader(io.StringIO(content))
-                for row in reader:
-                    try:
-                        ticker = row["ticker"].upper().strip()
-                        entry_date = row["entry_date"]
-                        entry_price = float(row["entry_price"])
-                        size = float(row["size"])
-                        direction = row["direction"].lower()
-                        exit_date = row.get("exit_date") or None
-                        exit_price = row.get("exit_price") or None
-                        exit_price_f = float(exit_price) if exit_price else None
-                        status = "closed" if exit_price else "open"
-                        trade = {
-                            "ticker": ticker,
-                            "entry_date": entry_date,
-                            "entry_price": entry_price,
-                            "size": size,
-                            "fees": float(row.get("fees") or 0),
-                            "direction": direction,
-                            "exit_date": exit_date,
-                            "exit_price": exit_price_f,
-                            "status": status,
-                        }
-                        trades.append(trade)
-                    except Exception:
-                        continue
-
-            # Merge open trades
-            merged_trades = merge_open_trades(trades)
-            for t in merged_trades:
-                try:
-                    ticker = t.get("symbol") or t.get("ticker")
-                    entry_date = t.get("entry_datetime") or t.get("entry_date")
-                    entry_price = float(t.get("entry_price") or 0)
-                    size = float(t.get("quantity") or t.get("size") or 0)
-                    fees = float(t.get("ib_commission") or t.get("fees") or 0)
-                    exit_date = t.get("exit_datetime") or t.get("exit_date")
-                    exit_price = t.get("exit_price")
-                    direction = t.get("direction", "long")
-                    status = t.get("status", "open" if not exit_date else "closed")
-                    # Deduplication logic
-                    fp = _trade_fingerprint({
-                        "ticker": ticker,
-                        "direction": direction,
-                        "entry_date": entry_date,
-                        "exit_date": exit_date,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "size": size,
-                        "status": status,
-                    })
-                    fp_coarse = _trade_fingerprint_coarse({
-                        "ticker": ticker,
-                        "direction": direction,
-                        "entry_date": entry_date,
-                        "exit_date": exit_date,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "status": status,
-                    })
-                    fp_fuzzy = _trade_fingerprint_fuzzy({
-                        "ticker": ticker,
-                        "direction": direction,
-                        "entry_date": entry_date,
-                        "exit_date": exit_date,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "status": status,
-                    })
-                    if (
-                        fp in existing_fingerprints
-                        or fp_coarse in existing_fingerprints_coarse
-                        or fp_fuzzy in existing_fingerprints_fuzzy
-                    ):
-                        dedup_count += 1
-                        continue
-                    db.execute("""INSERT INTO trades
-                        (ticker, market, direction, entry_date, exit_date, entry_price,
-                         exit_price, size, fees, setup, tags, status)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (ticker, 'Stk', direction, entry_date, exit_date, entry_price, exit_price, size, fees, 'import', 'import', status))
-                    count += 1
-                    existing_fingerprints.add(fp)
-                    existing_fingerprints_coarse.add(fp_coarse)
-                    existing_fingerprints_fuzzy.add(fp_fuzzy)
-                except Exception as e:
-                    flash(f"Skipped a row: {e}", "warning")
-
             db.commit()
-            flash(f"Imported {count} trades ✅", "success")
             if interest_count:
                 flash(f"✅ Added/updated {interest_count} interest entries", "success")
-            if dedup_count:
-                flash(f"⚠️ Skipped {dedup_count} duplicate trade(s) during import.", "warning")
+            else:
+                flash("No interest entries found in that file.", "warning")
         except Exception as e:
             flash(f"Import failed: {e}", "danger")
-        return redirect(url_for("trades_list"))
+        return redirect(url_for("interest_history"))
     return render_template("import_csv.html")
 
 # ---------- Export ----------
 @app.route("/export.csv")
 def export_csv():
-    rows = get_db().execute("SELECT * FROM trades WHERE (tags IS NULL OR tags NOT LIKE '%playbook%') ORDER BY entry_date").fetchall()
+    rows = get_db().execute("SELECT * FROM trades ORDER BY entry_datetime").fetchall()
     output = io.StringIO()
     if rows:
         writer = csv.DictWriter(output, fieldnames=rows[0].keys())
@@ -3550,8 +2379,8 @@ def backup_zip():
     """Zip up DB + screenshots + obsidian notes."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        if os.path.exists(DB_PATH):
-            z.write(DB_PATH, "journal.db")
+        if os.path.exists(V3_DB_PATH):
+            z.write(V3_DB_PATH, "journal_v3.db")
         for fname in os.listdir(UPLOAD_DIR):
             z.write(os.path.join(UPLOAD_DIR, fname), f"uploads/{fname}")
         for fname in os.listdir(OBSIDIAN_NOTES_DIR):
@@ -3560,32 +2389,6 @@ def backup_zip():
     return send_file(buf, mimetype="application/zip", as_attachment=True,
                      download_name=f"trading-journal-backup-{date.today().isoformat()}.zip")
 
-# # ---------- Reviews ----------
-# @app.route("/reviews", methods=["GET", "POST"])
-# def reviews():
-#     db = get_db()
-#     if request.method == "POST":
-#         f = request.form
-#         db.execute("""INSERT INTO reviews (week_start, what_worked, what_didnt, focus_next_week)
-#                       VALUES (?,?,?,?)""",
-#                    (f["week_start"], f.get("what_worked"), f.get("what_didnt"), f.get("focus_next_week")))
-#         db.commit()
-#         flash("Review saved ✅", "success")
-#         return redirect(url_for("reviews"))
-#     rows = db.execute("SELECT * FROM reviews ORDER BY week_start DESC").fetchall()
-#     return render_template("reviews.html", reviews=rows)
-
-# # ---------- Replay ----------
-# @app.route("/replay")
-# def replay():
-#     trades = all_trades_dicts()
-#     return render_template("replay.html", trades=trades)
-
-# @app.route("/uploads/<path:filename>")
-# def uploads(filename):
-#     return send_from_directory(UPLOAD_DIR, filename)
-    
- 
 # ---------- Yahoo Finance Charting -----------
 
 @app.route("/api/chart/<ticker>")
