@@ -308,6 +308,13 @@ def build_trade_campaigns(trades):
             return parse_trade_datetime(trade.get("exit_date")) or datetime.min
         return parse_trade_datetime(trade.get("entry_date")) or datetime.min
 
+    def _entry_dt(trade):
+        return (
+            parse_trade_datetime(trade.get("entry_date"))
+            or parse_yyyymmddhhmm(trade.get("entry_datetime"))
+            or parse_yyyymmddhhmm(trade.get("entry_date"))
+        )
+
     grouped_streams = defaultdict(list)
     for trade in trades:
         grouped_streams[(_symbol(trade), _direction(trade))].append(trade)
@@ -319,8 +326,30 @@ def build_trade_campaigns(trades):
         active = None
         active_open_qty = 0.0
         campaign_index = 0
-        # Rows carrying their own entry+exit: one campaign per entry timestamp.
+        # Rows carrying their own entry+exit: merge close entry timestamps (±1 min) into one campaign.
         standalone_by_entry = {}
+        standalone_entry_anchors = []
+
+        def _standalone_bucket_key(trade):
+            entry_dt = _entry_dt(trade)
+            if entry_dt is None:
+                return f"__id__{trade.get('id')}"
+
+            # Reuse an existing bucket if this entry is within ±1 minute.
+            closest_key = None
+            closest_delta = None
+            for anchor_key, anchor_dt in standalone_entry_anchors:
+                delta = abs((entry_dt - anchor_dt).total_seconds())
+                if delta <= 60 and (closest_delta is None or delta < closest_delta):
+                    closest_key = anchor_key
+                    closest_delta = delta
+
+            if closest_key is not None:
+                return closest_key
+
+            new_key = f"__entry__{entry_dt.strftime('%Y%m%d%H%M')}"
+            standalone_entry_anchors.append((new_key, entry_dt))
+            return new_key
 
         def _finalize(camp):
             if not camp or not camp.get("trades"):
@@ -364,10 +393,8 @@ def build_trade_campaigns(trades):
 
             if status == "closed":
                 if active is None or active_open_qty <= 0:
-                    # Standalone round-trip: merge every scale-out sharing the same entry timestamp.
-                    entry_key = trade.get("entry_datetime") or trade.get("entry_date") or ""
-                    if not entry_key:
-                        entry_key = f"__id__{trade.get('id')}"
+                    # Standalone round-trip: merge scale-outs with entry times within ±1 minute.
+                    entry_key = _standalone_bucket_key(trade)
                     camp = standalone_by_entry.get(entry_key)
                     if camp is None:
                         campaign_index += 1
