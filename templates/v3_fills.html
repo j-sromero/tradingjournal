@@ -2,6 +2,7 @@
 
 {% block content %}
 <h1>v3 Trade Fills</h1>
+{% set campaign_trade_ids = trades | map(attribute='id') | join(',') %}
 <div class="card filter-summary">
   <strong>Position breakdown:</strong> {{ raw_group_label }}
   <span class="muted">Each row below is one exit (fill) from this grouped position.</span>
@@ -45,7 +46,7 @@
       <td>{{ ('%.2fR' % t.r_multiple) if t.r_multiple is not none else '—' }}</td>
       <td><span class="badge {{ t.status }}">{{ t.status }}</span></td>
       <td>
-        <a href="{{ url_for('v3_chart_view', trade_id=t.id, symbol=t.ticker or t.symbol, entry=t.entry_date, exit=t.exit_date or '', entry_price=t.entry_price, exit_price=t.exit_price if t.exit_price is not none else '') }}">chart</a>
+        <a href="{{ url_for('v3_chart_view', trade_id=t.id, symbol=t.ticker or t.symbol, entry=t.entry_date, exit=t.exit_date or '', entry_price=t.entry_price, exit_price=t.exit_price if t.exit_price is not none else '', campaign_trade_ids=campaign_trade_ids) }}">chart</a>
       </td>
     </tr>
     {% else %}
@@ -54,4 +55,30 @@
   </tbody>
 </table>
 </div>
+
+{% if focus_trade %}
+<div class="card" style="margin-top:1rem;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:0.8rem;flex-wrap:wrap;">
+    <div>
+      <h2 style="margin:0 0 0.35rem 0;">Campaign Chart</h2>
+      <p class="muted" style="margin:0;">
+        Focused fill: #{{ focus_trade.id }} · {{ focus_trade.ticker or focus_trade.symbol }} ·
+        {{ focus_trade.entry_date|display_date }} → {{ focus_trade.exit_date|display_date if focus_trade.exit_date else '—' }}
+      </p>
+    </div>
+    <a class="btn" href="{{ url_for('v3_chart_view', trade_id=focus_trade.id, symbol=focus_trade.ticker or focus_trade.symbol, entry=focus_trade.entry_date, exit=focus_trade.exit_date or '', entry_price=focus_trade.entry_price, exit_price=focus_trade.exit_price if focus_trade.exit_price is not none else '', campaign_trade_ids=campaign_trade_ids) }}">
+      Open full chart page
+    </a>
+  </div>
+  <div style="margin-top:0.9rem; border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#131722;">
+    <iframe
+      title="Campaign trade chart"
+      src="{{ url_for('v3_chart_view', trade_id=focus_trade.id, symbol=focus_trade.ticker or focus_trade.symbol, entry=focus_trade.entry_date, exit=focus_trade.exit_date or '', entry_price=focus_trade.entry_price, exit_price=focus_trade.exit_price if focus_trade.exit_price is not none else '', campaign_trade_ids=campaign_trade_ids) }}"
+      style="display:block;width:100%;height:920px;border:0;"
+      loading="lazy"
+      referrerpolicy="same-origin">
+    </iframe>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

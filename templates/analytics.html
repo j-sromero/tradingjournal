@@ -18,6 +18,7 @@
     <div>
       <h2 style="margin-bottom:0.35rem;">Trade Performance Distribution</h2>
       <p class="muted" style="margin:0;">Trades are shown in chronological order so you can see how consistently you cut losers and let winners run over time.</p>
+      <p class="muted" style="margin:0.35rem 0 0; font-size:0.85rem;">Click any bar to open the campaign fills view with full trade rows and chart links.</p>
     </div>
     <label style="display:flex;align-items:center;gap:0.6rem;color:var(--muted);font-size:0.9rem;font-weight:600;">
       Metric
@@ -179,6 +180,40 @@
 
   const histogramCanvas = document.getElementById('trade-performance-histogram');
   if (histogramCanvas) {
+    histogramCanvas.style.cursor = 'pointer';
+
+    function openTradeDetail(trade) {
+      if (!trade) return;
+      if (trade.campaign_id) {
+        const campaignParams = new URLSearchParams();
+        campaignParams.set('q', (trade.ticker || '').toLowerCase());
+        campaignParams.set('status', '');
+        campaignParams.set('raw', '1');
+        campaignParams.set('campaign', trade.campaign_id);
+        campaignParams.set('merge_open', 'False');
+        if (trade.trade_id !== null && trade.trade_id !== undefined) {
+          campaignParams.set('focus_trade_id', String(trade.trade_id));
+        }
+        window.location.href = `/v3/trades?${campaignParams.toString()}`;
+        return;
+      }
+
+      const params = new URLSearchParams();
+      if (trade.trade_id !== null && trade.trade_id !== undefined) params.set('trade_id', String(trade.trade_id));
+      if (trade.ticker) params.set('symbol', trade.ticker);
+      if (trade.entry_date) params.set('entry', trade.entry_date);
+      if (trade.exit_date) params.set('exit', trade.exit_date);
+      if (trade.entry_price !== null && trade.entry_price !== undefined) params.set('entry_price', String(trade.entry_price));
+      if (trade.exit_price !== null && trade.exit_price !== undefined) params.set('exit_price', String(trade.exit_price));
+      if (trade.direction) params.set('direction', trade.direction);
+      if (trade.size !== null && trade.size !== undefined) params.set('size', String(trade.size));
+      if (trade.pnl !== null && trade.pnl !== undefined) params.set('pnl', String(trade.pnl));
+      if (trade.pnl_pct !== null && trade.pnl_pct !== undefined) params.set('pnl_pct', String(trade.pnl_pct));
+      if (trade.r_multiple !== null && trade.r_multiple !== undefined) params.set('r_multiple', String(trade.r_multiple));
+      if (trade.setup) params.set('setup', trade.setup);
+      window.location.href = `/v3/chart?${params.toString()}`;
+    }
+
     const defaultMetric = metricConfig[histogramMetricSelect?.value || 'pnl'];
     const histogramChart = new Chart(histogramCanvas, {
       type: 'bar',
@@ -196,6 +231,13 @@
       options: {
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
+        onClick: (event) => {
+          const points = histogramChart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, true);
+          if (!points.length) return;
+          const point = points[0];
+          const trade = tradeHistogram[point.index];
+          openTradeDetail(trade);
+        },
         plugins: {
           legend: { display: false },
           tooltip: {

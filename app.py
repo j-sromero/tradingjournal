@@ -1158,9 +1158,11 @@ def v3_trades_list():
     # Support raw (fills) view for grouped trades
     show_individual = request.args.get("raw") == "1"
     selected_campaign = request.args.get("campaign", "")
+    focus_trade_id_raw = (request.args.get("focus_trade_id", "") or "").strip()
     raw_group_active = show_individual and selected_campaign in campaign_map
     raw_group_label = None
     raw_group_anchor = None
+    focus_trade = None
     if raw_group_active:
         selected_camp = campaign_map[selected_campaign]
         selected_members = sorted(
@@ -1200,6 +1202,12 @@ def v3_trades_list():
         raw_group_label = f"{selected_members[0].get('ticker', selected_members[0].get('symbol', ''))} · {selected_members[0]['entry_date']}"
         raw_group_anchor = selected_members[0]["id"]
 
+        if focus_trade_id_raw.isdigit():
+            focus_trade_id = int(focus_trade_id_raw)
+            focus_trade = next((t for t in trades if int(t.get("id") or 0) == focus_trade_id), None)
+        if focus_trade is None and trades:
+            focus_trade = trades[-1]
+
     selected_day_label = format_display_date(selected_day) if selected_day else None
     stats = {"execution": {"optimal_size": 0}}
     if raw_group_active:
@@ -1212,6 +1220,7 @@ def v3_trades_list():
             raw_group_label=raw_group_label,
             raw_group_anchor=raw_group_anchor,
             merge_open=merge_open,
+            focus_trade=focus_trade,
         )
     else:
         return render_template(
@@ -1239,11 +1248,18 @@ def v3_trades_list():
 @app.route("/v3/chart")
 def v3_chart_view():
     trade_id_raw = (request.args.get("trade_id", "") or "").strip()
+    campaign_trade_ids_raw = (request.args.get("campaign_trade_ids", "") or "").strip()
     symbol = (request.args.get("symbol", "") or "").strip().upper() or "AAPL"
     entry = (request.args.get("entry", "") or "").strip()
     exit_dt = (request.args.get("exit", "") or "").strip()
     entry_price = (request.args.get("entry_price", "") or "").strip()
     exit_price = (request.args.get("exit_price", "") or "").strip()
+    direction_qs = (request.args.get("direction", "") or "").strip().lower()
+    size_qs = (request.args.get("size", "") or "").strip()
+    pnl_qs = (request.args.get("pnl", "") or "").strip()
+    pnl_pct_qs = (request.args.get("pnl_pct", "") or "").strip()
+    r_multiple_qs = (request.args.get("r_multiple", "") or "").strip()
+    setup_qs = (request.args.get("setup", "") or "").strip()
     et_tz = ZoneInfo("America/New_York")
 
     # --- Prev/Next trade navigation logic (by entry_datetime, same symbol) ---
@@ -1301,68 +1317,6 @@ def v3_chart_view():
             return text[0:4] + text[5:7] + text[8:10] + text[11:13] + text[14:16]
         return ""
 
-    def _load_v3_trade_row():
-        if not os.path.exists(V3_DB_PATH):
-            return None
-
-        conn = sqlite3.connect(V3_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        try:
-            if trade_id_raw.isdigit():
-                row = conn.execute(
-                    "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price FROM trades WHERE id=?",
-                    (int(trade_id_raw),),
-                ).fetchone()
-                if row:
-                    return row
-
-            entry_key = _normalize_v3_dt(entry)
-            exit_key = _normalize_v3_dt(exit_dt)
-            if entry_key:
-                if exit_key:
-                    row = conn.execute(
-                        """
-                        SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price
-                        FROM trades
-                        WHERE UPPER(symbol)=?
-                          AND entry_datetime=?
-                          AND COALESCE(exit_datetime, '')=?
-                        ORDER BY id DESC
-                        LIMIT 1
-                        """,
-                        (symbol, entry_key, exit_key),
-                    ).fetchone()
-                    if row:
-                        return row
-
-                return conn.execute(
-                    """
-                    SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price
-                    FROM trades
-                    WHERE UPPER(symbol)=?
-                      AND entry_datetime=?
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (symbol, entry_key),
-                ).fetchone()
-        finally:
-            conn.close()
-
-        return None
-
-    row = _load_v3_trade_row()
-    if row:
-        symbol = row["symbol"] or symbol or "AAPL"
-        if not entry:
-            entry = (row["entry_datetime"] or "").strip()
-        if not exit_dt:
-            exit_dt = (row["exit_datetime"] or "").strip()
-        if not entry_price and row["entry_price"] is not None:
-            entry_price = str(row["entry_price"])
-        if not exit_price and row["exit_price"] is not None:
-            exit_price = str(row["exit_price"])
-
     def _fmt_hint(value):
         text = (value or "").strip()
         if len(text) >= 12 and text[:12].isdigit():
@@ -1393,6 +1347,171 @@ def v3_chart_view():
         except Exception:
             return text
 
+    def _load_v3_trade_row():
+        if not os.path.exists(V3_DB_PATH):
+            return None
+
+        conn = sqlite3.connect(V3_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            if trade_id_raw.isdigit():
+                row = conn.execute(
+                    "SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction FROM trades WHERE id=?",
+                    (int(trade_id_raw),),
+                ).fetchone()
+                if row:
+                    return row
+
+            entry_key = _normalize_v3_dt(entry)
+            exit_key = _normalize_v3_dt(exit_dt)
+            if entry_key:
+                if exit_key:
+                    row = conn.execute(
+                        """
+                                                SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction
+                        FROM trades
+                        WHERE UPPER(symbol)=?
+                          AND entry_datetime=?
+                          AND COALESCE(exit_datetime, '')=?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (symbol, entry_key, exit_key),
+                    ).fetchone()
+                    if row:
+                        return row
+
+                return conn.execute(
+                    """
+                                        SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction
+                    FROM trades
+                    WHERE UPPER(symbol)=?
+                      AND entry_datetime=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (symbol, entry_key),
+                ).fetchone()
+        finally:
+            conn.close()
+
+        return None
+
+    row = _load_v3_trade_row()
+    trade_meta = None
+    if row:
+        symbol = row["symbol"] or symbol or "AAPL"
+        if not entry:
+            entry = (row["entry_datetime"] or "").strip()
+        if not exit_dt:
+            exit_dt = (row["exit_datetime"] or "").strip()
+        if not entry_price and row["entry_price"] is not None:
+            entry_price = str(row["entry_price"])
+        if not exit_price and row["exit_price"] is not None:
+            exit_price = str(row["exit_price"])
+
+        try:
+            size_val = float(row["quantity"] or 0)
+        except Exception:
+            size_val = None
+        try:
+            entry_val = float(row["entry_price"]) if row["entry_price"] is not None else None
+        except Exception:
+            entry_val = None
+        try:
+            exit_val = float(row["exit_price"]) if row["exit_price"] is not None else None
+        except Exception:
+            exit_val = None
+        try:
+            fees_val = float(row["ib_commission"] or 0)
+        except Exception:
+            fees_val = None
+
+        direction_val = (row["direction"] or "long").strip().lower()
+        pnl_abs = None
+        pnl_pct = None
+        if entry_val is not None and exit_val is not None and size_val is not None:
+            direction_sign = -1 if direction_val == "short" else 1
+            pnl_abs = (exit_val - entry_val) * size_val * direction_sign - (fees_val or 0)
+            entry_notional = abs(entry_val * size_val)
+            pnl_pct = (pnl_abs / entry_notional * 100) if entry_notional else None
+
+        trade_meta = {
+            "trade_id": int(row["id"]) if row["id"] is not None else None,
+            "symbol": symbol,
+            "direction": direction_val,
+            "size": round(size_val, 4) if size_val is not None else None,
+            "entry_datetime": _fmt_hint(entry),
+            "exit_datetime": _fmt_hint(exit_dt),
+            "entry_price": round(entry_val, 4) if entry_val is not None else None,
+            "exit_price": round(exit_val, 4) if exit_val is not None else None,
+            "fees": round(fees_val, 4) if fees_val is not None else None,
+            "pnl_abs": round(pnl_abs, 4) if pnl_abs is not None else None,
+            "pnl_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
+            "r_multiple": None,
+            "setup": "v3 import",
+        }
+    else:
+        # Fallback when a row cannot be found but query string contains trade context.
+        def _to_float_or_none(value):
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        trade_meta = {
+            "trade_id": int(trade_id_raw) if trade_id_raw.isdigit() else None,
+            "symbol": symbol,
+            "direction": direction_qs or "long",
+            "size": _to_float_or_none(size_qs),
+            "entry_datetime": _fmt_hint(entry),
+            "exit_datetime": _fmt_hint(exit_dt),
+            "entry_price": _to_float_or_none(entry_price),
+            "exit_price": _to_float_or_none(exit_price),
+            "fees": None,
+            "pnl_abs": _to_float_or_none(pnl_qs),
+            "pnl_pct": _to_float_or_none(pnl_pct_qs),
+            "r_multiple": _to_float_or_none(r_multiple_qs),
+            "setup": setup_qs or "v3 import",
+        }
+
+    campaign_extra_exit_epochs = []
+    if campaign_trade_ids_raw:
+        ids = []
+        for part in campaign_trade_ids_raw.split(","):
+            part = part.strip()
+            if part.isdigit():
+                ids.append(int(part))
+
+        if ids and os.path.exists(V3_DB_PATH):
+            focused_id = None
+            if row and row["id"] is not None:
+                focused_id = int(row["id"])
+            elif trade_id_raw.isdigit():
+                focused_id = int(trade_id_raw)
+
+            conn_markers = sqlite3.connect(V3_DB_PATH)
+            conn_markers.row_factory = sqlite3.Row
+            try:
+                placeholders = ",".join(["?"] * len(ids))
+                marker_rows = conn_markers.execute(
+                    f"SELECT id, exit_datetime FROM trades WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+            finally:
+                conn_markers.close()
+
+            seen_epochs = set()
+            for marker_row in marker_rows:
+                marker_id = int(marker_row["id"])
+                if focused_id is not None and marker_id == focused_id:
+                    continue
+                marker_epoch = _hint_to_epoch(marker_row["exit_datetime"] or "")
+                if marker_epoch is None or marker_epoch in seen_epochs:
+                    continue
+                seen_epochs.add(marker_epoch)
+                campaign_extra_exit_epochs.append(marker_epoch)
+
     return render_template(
         "v3_chart.html",
         symbol=symbol,
@@ -1402,8 +1521,10 @@ def v3_chart_view():
         exit_price_hint=_fmt_price(exit_price),
         entry_epoch=_hint_to_epoch(entry),
         exit_epoch=_hint_to_epoch(exit_dt),
+        campaign_extra_exit_epochs=campaign_extra_exit_epochs,
         prev_id=prev_id,
         next_id=next_id,
+        trade_meta=trade_meta,
     )
 
 
@@ -1737,6 +1858,55 @@ def analytics():
                 }
             )
 
+    campaign_id_by_trade_id = {}
+    if os.path.exists(V3_DB_PATH):
+        conn = sqlite3.connect(V3_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            lifecycle_rows = conn.execute(
+                """
+                SELECT id, symbol, entry_datetime, exit_datetime, entry_price, exit_price, quantity, ib_commission, direction
+                FROM trades
+                ORDER BY entry_datetime ASC, id ASC
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        def _to_iso_v3(dt_text):
+            text = (dt_text or "").strip()
+            if len(text) >= 12 and text[:12].isdigit():
+                return f"{text[0:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}"
+            return text or None
+
+        lifecycle_trades = []
+        for r in lifecycle_rows:
+            entry_iso = _to_iso_v3(r["entry_datetime"])
+            exit_iso = _to_iso_v3(r["exit_datetime"])
+            lifecycle_trades.append(
+                {
+                    "id": int(r["id"]),
+                    "symbol": r["symbol"],
+                    "ticker": r["symbol"],
+                    "direction": (r["direction"] or "long"),
+                    "entry_datetime": r["entry_datetime"],
+                    "entry_date": entry_iso,
+                    "exit_date": exit_iso,
+                    "entry_price": float(r["entry_price"] or 0),
+                    "exit_price": None if r["exit_price"] is None else float(r["exit_price"] or 0),
+                    "size": float(r["quantity"] or 0),
+                    "fees": float(r["ib_commission"] or 0),
+                    "status": "closed" if exit_iso else "open",
+                }
+            )
+
+        for campaign in build_trade_campaigns(lifecycle_trades):
+            campaign_id = campaign.get("campaign_id")
+            for trade in campaign.get("trades") or []:
+                trade_id = trade.get("id")
+                if trade_id is not None and campaign_id:
+                    campaign_id_by_trade_id[int(trade_id)] = campaign_id
+
     def group_pnl(key_fn):
         d = defaultdict(lambda: {"pnl": 0, "count": 0, "wins": 0})
         for t in closed_positions:
@@ -1761,6 +1931,7 @@ def analytics():
             "index": idx,
             "label": f"T{idx}",
             "trade_id": t["id"],
+            "campaign_id": campaign_id_by_trade_id.get(t["id"]),
             "ticker": t["ticker"],
             "date": format_display_date(t["exit_date"] or t["entry_date"]),
             "entry_date": format_display_date(t["entry_date"]),
