@@ -535,6 +535,87 @@
     z-index: 2;
   }
 
+  .trend-cell-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+  }
+
+  .trend-spark {
+    position: relative;
+    width: 74px;
+    height: 22px;
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, .08);
+    padding: 2px;
+    overflow: hidden;
+  }
+
+  .trend-zero {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: rgba(148, 163, 184, .5);
+    pointer-events: none;
+  }
+
+  .trend-bar-wrap {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .trend-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-radius: 2px;
+  }
+
+  .trend-bar.is-pos {
+    background: #4ea8ff;
+  }
+
+  .trend-bar.is-neg {
+    background: #ff646a;
+  }
+
+  .trend-bar.is-up {
+    background: #4ea8ff;
+  }
+
+  .trend-bar.is-down {
+    background: #ff646a;
+  }
+
+  .trend-bar.is-flat {
+    background: #94a3b8;
+  }
+
+  .trend-dir {
+    font-size: .68rem;
+    font-weight: 700;
+    line-height: 1;
+    min-width: 10px;
+    text-align: center;
+  }
+
+  .trend-dir.is-up {
+    color: #4ea8ff;
+  }
+
+  .trend-dir.is-down {
+    color: #ff646a;
+  }
+
+  .trend-dir.is-flat {
+    color: #94a3b8;
+  }
+
   @media (max-width: 900px) {
     .group-hover-pop {
       left: 0;
@@ -1303,6 +1384,106 @@
     return ((close / open) - 1) * 100;
   }
 
+  function normalizeFundSeries(points, maxPoints = 9) {
+    if (!Array.isArray(points)) return [];
+    const out = points
+      .map(p => ({
+        period: String(p?.period || '').trim(),
+        value: Number(p?.value),
+      }))
+      .filter(p => p.period && Number.isFinite(p.value));
+    return out.length > maxPoints ? out.slice(-maxPoints) : out;
+  }
+
+  function extractFundSeries(metrics) {
+    const m = metrics || {};
+    return {
+      gaapEpsQuarterlySeries: normalizeFundSeries(m.gaap_eps_quarterly, 9),
+      salesQuarterlyMlnSeries: normalizeFundSeries(m.sales_quarterly_mln, 9),
+    };
+  }
+
+  async function fetchFundamentalSnapshot(symbol, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let res;
+    try {
+      res = await fetch(
+        `/api/stock-relations?t=${encodeURIComponent(symbol)}`,
+        { signal: controller.signal }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      throw new Error(`relations request failed for ${symbol}`);
+    }
+
+    const json = await res.json();
+    if (!json?.ok) {
+      throw new Error(`relations payload invalid for ${symbol}`);
+    }
+
+    return extractFundSeries(json.metrics || {});
+  }
+
+  function renderTrendBars(points, options = {}) {
+    const signed = Boolean(options?.signed);
+    const series = normalizeFundSeries(points, 9);
+    if (!series.length) return '—';
+
+    const values = series.map(p => Number(p.value));
+    const first = values[0];
+    const last = values[values.length - 1];
+    const delta = last - first;
+    const dirCls = delta > 0 ? 'is-up' : (delta < 0 ? 'is-down' : 'is-flat');
+    const dirGlyph = delta > 0 ? '↗' : (delta < 0 ? '↘' : '→');
+
+    let minVal;
+    let maxVal;
+    if (signed) {
+      minVal = Math.min(0, ...values);
+      maxVal = Math.max(0, ...values);
+    } else {
+      minVal = Math.min(...values);
+      maxVal = Math.max(...values);
+    }
+
+    const range = Math.max(1e-9, maxVal - minVal);
+    const showZero = signed && minVal < 0 && maxVal > 0;
+    const zeroTop = ((maxVal - 0) / range) * 100;
+
+    const bars = series.map((point, idx) => {
+      const v = Number(point.value);
+
+      if (signed) {
+        const topPct = ((maxVal - Math.max(v, 0)) / range) * 100;
+        const bottomPct = ((maxVal - Math.min(v, 0)) / range) * 100;
+        const heightPct = Math.max(2, bottomPct - topPct);
+        const cls = v >= 0 ? 'is-pos' : 'is-neg';
+        return `<span class="trend-bar-wrap" title="${escapeHtml(point.period)}: ${escapeHtml(v.toFixed(3))}"><span class="trend-bar ${cls}" style="top:${topPct.toFixed(2)}%;height:${heightPct.toFixed(2)}%"></span></span>`;
+      }
+
+      const prev = idx > 0 ? Number(series[idx - 1].value) : v;
+      const topPct = ((maxVal - v) / range) * 100;
+      const heightPct = Math.max(2, 100 - topPct);
+      const cls = idx === 0 ? 'is-flat' : (v >= prev ? 'is-up' : 'is-down');
+      return `<span class="trend-bar-wrap" title="${escapeHtml(point.period)}: ${escapeHtml(v.toFixed(2))}"><span class="trend-bar ${cls}" style="top:${topPct.toFixed(2)}%;height:${heightPct.toFixed(2)}%"></span></span>`;
+    }).join('');
+
+    return `
+      <span class="trend-cell-wrap" title="${escapeHtml(series[0].period)} → ${escapeHtml(series[series.length - 1].period)}">
+        <span class="trend-spark">
+          ${showZero ? `<span class="trend-zero" style="top:${zeroTop.toFixed(2)}%"></span>` : ''}
+          ${bars}
+        </span>
+        <span class="trend-dir ${dirCls}">${dirGlyph}</span>
+      </span>
+    `;
+  }
+
   function renderLookupMetricsTable(rows) {
     if (!Array.isArray(rows) || !rows.length) {
       return '<div class="empty-state-inline">No data available.</div>';
@@ -1335,6 +1516,8 @@
               <th scope="col">Avg $Vol</th>
               <th scope="col">ATR%</th>
               <th scope="col">YTD %</th>
+              <th scope="col">GAAP EPS Trend</th>
+              <th scope="col">Sales Trend</th>
               <th scope="col">ATRs vs 50SMA</th>
               <th scope="col">ATRs vs 21EMA</th>
             </tr>
@@ -1346,6 +1529,8 @@
               const atrText = fmtPctAbs(row.atrPct);
               const ytd = fmtPctWithClass(row.ytdPct);
               const avgDolVol20 = fmtDollarCompact(row.avgDollarVol20);
+              const gaapTrendHtml = renderTrendBars(row.gaapEpsQuarterlySeries, { signed: true });
+              const salesTrendHtml = renderTrendBars(row.salesQuarterlyMlnSeries, { signed: false });
               const atrsFrom50 = {
                 text: fmtNumber(row.atrsFromSma50, 2),
                 cls: clsForValue(Number.isFinite(Number(row.atrsFromSma50)) ? Number(row.atrsFromSma50) : 0),
@@ -1364,6 +1549,8 @@
                   <td>${avgDolVol20}</td>
                   <td>${atrText}</td>
                   <td class="${ytd.cls}">${ytd.text}</td>
+                  <td>${gaapTrendHtml}</td>
+                  <td>${salesTrendHtml}</td>
                   <td class="${atrsFrom50.cls}">${atrsFrom50.text}</td>
                   <td class="${atrsFrom21.cls}">${atrsFrom21.text}</td>
                 </tr>
@@ -1486,7 +1673,12 @@
 
       const metricsRows = await Promise.all(symbols.map(async (row) => {
         try {
-          const series = await fetchPriceSeries(row.ticker, '1d', 12000);
+          const [series, fundamentals] = await Promise.all([
+            fetchPriceSeries(row.ticker, '1d', 12000),
+            row.isBase
+              ? Promise.resolve(extractFundSeries(data.metrics || {}))
+              : fetchFundamentalSnapshot(row.ticker, 12000),
+          ]);
           const candles = Array.isArray(series?.candles) ? series.candles : [];
           return {
             ...row,
@@ -1496,6 +1688,8 @@
             avgDollarVol20: computeAvgDollarVolume20(series.price, series.volume),
             atrPct: computeAtrPercent(candles, 14),
             ytdPct: computeYtdPercent(candles),
+            gaapEpsQuarterlySeries: fundamentals?.gaapEpsQuarterlySeries ?? [],
+            salesQuarterlyMlnSeries: fundamentals?.salesQuarterlyMlnSeries ?? [],
             atrsFromSma50: computeAtrsAway(candles, 'sma50'),
             atrsFromEma21: computeAtrsAway(candles, 'ema21'),
           };
@@ -1507,6 +1701,8 @@
             openChangePct: null,
             atrPct: null,
             ytdPct: null,
+            gaapEpsQuarterlySeries: [],
+            salesQuarterlyMlnSeries: [],
             atrsFromSma50: null,
             atrsFromEma21: null,
           };

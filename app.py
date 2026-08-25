@@ -985,6 +985,7 @@ def api_stock_relations():
         "industry": industry,
         "peers": peers,
         "held_by_etfs": held_by,
+        "metrics": relations.get("metrics") or {},
         "source": relations.get("source"),
         "error": relations.get("error"),
         "debug": {

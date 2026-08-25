@@ -97,6 +97,63 @@ def _parse_finviz_quote_metrics(raw_html):
         m = re.search(pattern, text, re.IGNORECASE)
         return m.group(1).strip() if m else default
 
+    def _parse_fa_points(points):
+        out = []
+        if not isinstance(points, list):
+            return out
+
+        for p in points:
+            if not isinstance(p, dict):
+                continue
+
+            label = str(p.get("name") or "").strip()
+            value = p.get("value")
+            if not label or value is None:
+                continue
+
+            try:
+                value_num = float(value)
+            except (TypeError, ValueError):
+                continue
+
+            out.append({
+                "period": label,
+                "value": value_num,
+                "is_outlined": bool(p.get("isOutlined", False)),
+            })
+
+        return out
+
+    gaap_eps_quarterly = []
+    sales_quarterly_mln = []
+    gaap_eps_annual = []
+    sales_annual_mln = []
+
+    # Finviz embeds fundamentals chart data in JSON script `fa-init-data-0`.
+    # Series order is GAAP EPS, Sales ($mln), and Shares Outstanding.
+    try:
+        fa_match = re.search(
+            r'<script[^>]+id=["\']fa-init-data-0["\'][^>]*>(.*?)</script>',
+            raw_html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if fa_match:
+            fa_payload = json.loads(fa_match.group(1))
+
+            annual_values = (((fa_payload.get("annual") or {}).get("values")) or [])
+            quarterly_values = (((fa_payload.get("quarterly") or {}).get("values")) or [])
+
+            if len(annual_values) >= 2:
+                gaap_eps_annual = _parse_fa_points(annual_values[0])
+                sales_annual_mln = _parse_fa_points(annual_values[1])
+
+            if len(quarterly_values) >= 2:
+                gaap_eps_quarterly = _parse_fa_points(quarterly_values[0])
+                sales_quarterly_mln = _parse_fa_points(quarterly_values[1])
+    except Exception:
+        # Keep snapshot metrics available even if the chart-json format changes.
+        pass
+
     return {
         # Finviz renders these as adjacent text nodes; get_text(" ") puts one space between them.
         "short_ratio": _first(r'Short\s+Float\s+([\d.]+\s*%)'),
@@ -109,6 +166,10 @@ def _parse_finviz_quote_metrics(raw_html):
         "volume":      _first(r'\bVolume\s+([\d,]+)\s+Perf\s+Week'),
         "change":      _first(r'\bChange\s+([-+]?\d[\d.,]*\s*%)'),
         "price":       _first(r'\bPrice\s+([\d.,]+)\s+Change'),
+        "gaap_eps_quarterly": gaap_eps_quarterly,
+        "sales_quarterly_mln": sales_quarterly_mln,
+        "gaap_eps_annual": gaap_eps_annual,
+        "sales_annual_mln": sales_annual_mln,
     }
 
 
@@ -548,6 +609,12 @@ def fetch_market_group_top10(industry_slug):
             val = (metrics.get(field) or "").strip()
             if val and val != "\u2014":
                 row[field] = val
+
+        row["gaap_eps_quarterly"] = metrics.get("gaap_eps_quarterly") or []
+        row["sales_quarterly_mln"] = metrics.get("sales_quarterly_mln") or []
+        row["gaap_eps_annual"] = metrics.get("gaap_eps_annual") or []
+        row["sales_annual_mln"] = metrics.get("sales_annual_mln") or []
+
         avg_volume = (metrics.get("avg_volume") or "").strip()
         if avg_volume and avg_volume != "\u2014":
             row["volume"] = avg_volume
